@@ -1,99 +1,149 @@
-"""日记文件存储 — Markdown 文件操作"""
+"""日记存储 — SQLite 实现"""
 
 from __future__ import annotations
 
-import os
+import json
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime
-from pathlib import Path
+
+import aiosqlite
 
 
 class DiaryStore:
-    """日记存储：按用户/年/月 组织的 Markdown 文件"""
+    """日记存储：全部存在 SQLite 的 diary_entries 表中"""
 
-    def __init__(self, base_dir: str):
-        self.base_dir = Path(base_dir) / "diaries"
+    def __init__(self, db_path: str):
+        self.db_path = db_path
 
-    def _user_dir(self, user_id: str) -> Path:
-        return self.base_dir / user_id
-
-    def _file_path(self, user_id: str, date_str: str) -> Path:
-        """获取日记文件路径，如 diaries/hako/2026/06/05.md"""
+    @asynccontextmanager
+    async def _connect(self):
+        db = await aiosqlite.connect(self.db_path)
         try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError(f"日期格式错误，需要 YYYY-MM-DD: {date_str}")
-        return self._user_dir(user_id) / str(dt.year) / f"{dt.month:02d}" / f"{dt.day:02d}.md"
+            await db.execute("PRAGMA journal_mode = WAL")
+            yield db
+        finally:
+            await db.close()
+
+    async def initialize(self):
+        """创建 diary_entries 表"""
+        async with self._connect() as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS diary_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    topics TEXT DEFAULT '[]',
+                    sentiment TEXT DEFAULT '',
+                    importance REAL DEFAULT 0.5,
+                    atom_count INTEGER DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_diary_user_date
+                ON diary_entries(user_id, date)
+            """)
+            # 兼容旧表：添加可能缺失的列
+            for col in ["topics", "sentiment", "importance", "atom_count"]:
+                try:
+                    await db.execute(f"ALTER TABLE diary_entries ADD COLUMN {col}")
+                except Exception:
+                    pass
+            await db.commit()
 
     async def append(self, user_id: str, date_str: str, content: str):
-        """追加内容到当日日记文件（不存在则创建）"""
-        path = self._file_path(user_id, date_str)
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        header = ""
-        if not path.exists():
-            header = (
-                f"---\ndate: {date_str}\nuser_id: {user_id}\n---\n\n"
+        """追加内容到当日日记（追加到已有条目末尾，或创建新条目）"""
+        now = time.time()
+        async with self._connect() as db:
+            # 检查当天是否已有条目
+            row = await db.execute_fetchall(
+                "SELECT id, content FROM diary_entries WHERE user_id = ? AND date = ?",
+                (user_id, date_str),
             )
-
-        mode = "a" if path.exists() else "w"
-        with open(path, mode, encoding="utf-8") as f:
-            if header:
-                f.write(header)
-            # 追加时间标记
-            now = datetime.now().strftime("%H:%M")
-            f.write(f"\n## {now}\n\n{content.strip()}\n")
+            if row:
+                # 已有 → 追加
+                entry_id, old_content = row[0]
+                time_tag = datetime.now().strftime("%H:%M")
+                new_content = f"{old_content}\n\n## {time_tag}\n\n{content.strip()}"
+                await db.execute(
+                    "UPDATE diary_entries SET content = ?, updated_at = ? WHERE id = ?",
+                    (new_content, now, entry_id),
+                )
+            else:
+                # 没有 → 新建
+                await db.execute("""
+                    INSERT INTO diary_entries
+                    (user_id, date, content, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (user_id, date_str, content.strip(), now, now))
+            await db.commit()
 
     async def read(self, user_id: str, date_str: str) -> str | None:
         """读取某天的日记"""
-        path = self._file_path(user_id, date_str)
-        if not path.exists():
-            return None
-        with open(path, encoding="utf-8") as f:
-            return f.read()
+        async with self._connect() as db:
+            rows = await db.execute_fetchall(
+                "SELECT content FROM diary_entries WHERE user_id = ? AND date = ?",
+                (user_id, date_str),
+            )
+        return rows[0][0] if rows else None
 
     async def list_months(self, user_id: str) -> list[dict[str, str]]:
         """列出所有有日记的年月"""
-        user_dir = self._user_dir(user_id)
-        if not user_dir.exists():
-            return []
-        months = []
-        for year_dir in sorted(user_dir.iterdir(), reverse=True):
-            if not year_dir.is_dir() or not year_dir.name.isdigit():
-                continue
-            for month_dir in sorted(year_dir.iterdir(), reverse=True):
-                if not month_dir.is_dir() or not month_dir.name.isdigit():
-                    continue
-                months.append({
-                    "year": year_dir.name,
-                    "month": month_dir.name,
-                })
-        return months
+        async with self._connect() as db:
+            rows = await db.execute_fetchall("""
+                SELECT DISTINCT substr(date, 1, 4) as year, substr(date, 6, 2) as month
+                FROM diary_entries WHERE user_id = ?
+                ORDER BY year DESC, month DESC
+            """, (user_id,))
+        return [{"year": r[0], "month": r[1]} for r in rows]
 
     async def list_dates(self, user_id: str, year: str, month: str) -> list[dict]:
         """列出某个月份所有日记日期"""
-        user_dir = self._user_dir(user_id)
-        month_path = user_dir / year / month
-        if not month_path.exists():
-            return []
-        dates = []
-        for f in sorted(month_path.iterdir(), reverse=True):
-            if f.suffix == ".md" and f.stem.isdigit():
-                dates.append({
-                    "date": f"{year}-{month}-{f.stem}",
-                    "file": str(f),
-                })
-        return dates
+        prefix = f"{year}-{month}"
+        async with self._connect() as db:
+            rows = await db.execute_fetchall("""
+                SELECT date FROM diary_entries
+                WHERE user_id = ? AND date LIKE ?
+                ORDER BY date DESC
+            """, (user_id, f"{prefix}%"))
+        return [{"date": r[0]} for r in rows]
 
     async def delete_date(self, user_id: str, date_str: str) -> bool:
-        """删除某天的日记文件"""
-        path = self._file_path(user_id, date_str)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+        """删除某天的日记"""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM diary_entries WHERE user_id = ? AND date = ?",
+                (user_id, date_str),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def get_all_user_ids(self) -> list[str]:
         """获取所有有日记的用户 ID"""
-        if not self.base_dir.exists():
-            return []
-        return [d.name for d in self.base_dir.iterdir() if d.is_dir()]
+        async with self._connect() as db:
+            rows = await db.execute_fetchall(
+                "SELECT DISTINCT user_id FROM diary_entries"
+            )
+        return [r[0] for r in rows]
+
+    async def update_metadata(self, user_id: str, date_str: str, **kwargs):
+        """更新日记的元数据（话题、情感等）"""
+        sets = []
+        vals = []
+        for key, val in kwargs.items():
+            if key in ("topics", "sentiment", "importance", "atom_count"):
+                sets.append(f"{key} = ?")
+                vals.append(val)
+        if not sets:
+            return
+        vals.append(user_id)
+        vals.append(date_str)
+        async with self._connect() as db:
+            await db.execute(
+                f"UPDATE diary_entries SET {', '.join(sets)} WHERE user_id = ? AND date = ?",
+                vals,
+            )
+            await db.commit()

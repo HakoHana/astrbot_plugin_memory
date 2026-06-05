@@ -55,8 +55,6 @@ class MemoryCore:
 
         # 创建数据目录
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        (self.data_dir / "diaries").mkdir(parents=True, exist_ok=True)
-        (self.data_dir / "personas").mkdir(parents=True, exist_ok=True)
 
         prompts_dir = str(Path(__file__).parent.parent / "prompts")
         db_path = str(self.data_dir / "memory.db")
@@ -67,11 +65,12 @@ class MemoryCore:
 
         # 2. 存储层
         self.atom_store = AtomStore(db_path)
-        self.diary_store = DiaryStore(str(self.data_dir))
+        self.diary_store = DiaryStore(db_path)
         self.persona_store = PersonaStore(str(self.data_dir))
         self.state_store = StateStore(db_path)
 
         await self.atom_store.initialize()
+        await self.diary_store.initialize()
         await self.state_store.initialize()
 
         # 3. 核心业务模块

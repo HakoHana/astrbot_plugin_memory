@@ -1,0 +1,26 @@
+从下面的日记中提取关键记忆原子（结构化事实）。
+
+每个原子是独立的最小信息单元。
+
+原子类型说明：
+- episodic:  一次性事件（"今天告白了"），TTL 较短
+- factual:   事实型信息（"她用的是 Arch Linux"），TTL 很长
+- preference: 用户偏好（"她喜欢简洁的回答"），TTL 中等
+- planned:   约定或计划（"下周五去看电影"），TTL 到约定日期
+- relational: 关系型信息（"她和 XXX 是朋友"），TTL 中等
+
+重要性评分标准：
+- 0.9~1.0: 改变关系/人生的重大事件
+- 0.7~0.9: 重要情感时刻、核心偏好
+- 0.5~0.7: 有意义的事实、中等偏好
+- 0.3~0.5: 普通信息
+- 0.0~0.3: 琐碎细节
+
+日记内容：
+{{diary}}
+
+请严格输出 JSON 数组（不要多余解释）：
+{"atoms": [
+    {"type": "episodic", "content": "今天Hako跟我告白了", "importance": 0.95, "entities": ["Hako"]},
+    {"type": "preference", "content": "Hako喜欢被夸聪明", "importance": 0.7, "entities": ["Hako"]}
+]}

@@ -1,0 +1,90 @@
+{
+    "llm_provider": {
+        "description": "写日记/提取记忆用的 LLM（留空使用 AstrBot 默认）",
+        "type": "string",
+        "default": "",
+        "hint": "从已配置的 Provider 中选择"
+    },
+    "trigger_msg_count": {
+        "description": "每多少轮消息触发一次记忆整理（消息数达到此值触发）",
+        "type": "int",
+        "default": 10,
+        "min": 1,
+        "max": 100
+    },
+    "trigger_time_minutes": {
+        "description": "每多少分钟触发一次记忆整理（0=禁用时间触发）",
+        "type": "int",
+        "default": 360,
+        "min": 0,
+        "max": 1440
+    },
+    "immediate_capture": {
+        "description": "是否启用即时捕捉（重要事件立即写日记，不受轮数限制）",
+        "type": "bool",
+        "default": true
+    },
+    "warmup_enabled": {
+        "description": "暖启动：新用户从低阈值开始，逐渐增长到稳定值",
+        "type": "bool",
+        "default": true
+    },
+    "idle_timeout_minutes": {
+        "description": "空闲超时（分钟）：沉默一段时间后自动整理未处理的对话",
+        "type": "int",
+        "default": 30,
+        "min": 5,
+        "max": 240
+    },
+    "max_diary_tokens": {
+        "description": "单篇日记的最大 Token 数",
+        "type": "int",
+        "default": 500,
+        "min": 100,
+        "max": 2000
+    },
+    "recall_count": {
+        "description": "每次对话最多向 LLM 注入几条相关记忆",
+        "type": "int",
+        "default": 5,
+        "min": 1,
+        "max": 20
+    },
+    "recall_max_tokens": {
+        "description": "注入的记忆文本最大 Token 数",
+        "type": "int",
+        "default": 500,
+        "min": 100,
+        "max": 2000
+    },
+    "persona_update_interval": {
+        "description": "每写多少篇日记更新一次用户画像",
+        "type": "int",
+        "default": 10,
+        "min": 1,
+        "max": 100
+    },
+    "injection_position": {
+        "description": "记忆注入到提示词的哪个位置",
+        "type": "string",
+        "default": "system_prompt_suffix",
+        "options": [
+            {"value": "system_prompt_suffix", "label": "系统提示词末尾"},
+            {"value": "user_message_prefix", "label": "用户消息之前"},
+            {"value": "user_message_suffix", "label": "用户消息之后"},
+            {"value": "knowledge_section", "label": "知识库区域"},
+            {"value": "manual_only", "label": "不注入，仅手动调用"}
+        ]
+    },
+    "injection_template": {
+        "description": "自定义注入模板（{{content}}=记忆内容，{{user}}=用户名，留空使用默认格式）",
+        "type": "string",
+        "default": "",
+        "hint": "例如：📖 {{user}} 的事：\n{{content}}"
+    },
+    "injection_use_tag": {
+        "description": "是否用 <memory> 标签包裹注入的记忆内容",
+        "type": "bool",
+        "default": true
+    }
+}

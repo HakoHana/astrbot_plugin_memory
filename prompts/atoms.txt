@@ -19,8 +19,12 @@
 日记内容：
 {{diary}}
 
+额外要求：
+- 每个原子必须包含 `diary_snippet` 字段——从日记原文中摘录相应的句子片段。
+- 这用于溯源，不是原子主体内容，保持简短即可。
+
 请严格输出 JSON 数组（不要多余解释）：
 {"atoms": [
-    {"type": "episodic", "content": "今天Hako跟我告白了", "importance": 0.95, "entities": ["Hako"]},
-    {"type": "preference", "content": "Hako喜欢被夸聪明", "importance": 0.7, "entities": ["Hako"]}
+    {"type": "episodic", "content": "2026-06-05 Hako向Bot告白", "importance": 0.95, "entities": ["Hako"], "diary_snippet": "今天Hako跟我告白啦！！"},
+    {"type": "preference", "content": "Hako喜欢被夸聪明", "importance": 0.7, "entities": ["Hako"], "diary_snippet": "我夸她聪明的时候她可开心了"}
 ]}

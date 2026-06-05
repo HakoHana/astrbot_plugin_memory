@@ -49,6 +49,7 @@ class AtomStore:
                     status TEXT NOT NULL DEFAULT 'active',
                     session_id TEXT,
                     diary_ref TEXT,
+                    diary_snippet TEXT DEFAULT '',
                     embedding BLOB,
                     embedding_model TEXT,
                     metadata TEXT DEFAULT '{}'
@@ -69,6 +70,14 @@ class AtomStore:
             ]:
                 await db.execute(idx)
 
+            # 兼容老数据库：添加缺失的 diary_snippet 列
+            try:
+                await db.execute(
+                    "ALTER TABLE memory_atoms ADD COLUMN diary_snippet TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass  # 列已存在
+
             await db.commit()
 
     async def insert(self, atom: MemoryAtom) -> int:
@@ -78,14 +87,16 @@ class AtomStore:
                 INSERT INTO memory_atoms
                 (user_id, diary_date, atom_type, content, entities,
                  importance, confidence, access_count, created_at,
-                 last_accessed_at, ttl_days, status, session_id, diary_ref, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 last_accessed_at, ttl_days, status, session_id, diary_ref,
+                 diary_snippet, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 atom.user_id, atom.diary_date, atom.atom_type.value, atom.content,
                 json.dumps(atom.entities, ensure_ascii=False),
                 atom.importance, atom.confidence, atom.access_count,
                 atom.created_at, atom.last_accessed_at, atom.ttl_days,
                 atom.status.value, atom.session_id, atom.diary_ref,
+                atom.diary_snippet,
                 json.dumps(atom.metadata, ensure_ascii=False),
             ))
             atom_id = cursor.lastrowid
@@ -108,14 +119,16 @@ class AtomStore:
                     INSERT INTO memory_atoms
                     (user_id, diary_date, atom_type, content, entities,
                      importance, confidence, access_count, created_at,
-                     last_accessed_at, ttl_days, status, session_id, diary_ref, metadata)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_accessed_at, ttl_days, status, session_id, diary_ref,
+                     diary_snippet, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     atom.user_id, atom.diary_date, atom.atom_type.value, atom.content,
                     json.dumps(atom.entities, ensure_ascii=False),
                     atom.importance, atom.confidence, atom.access_count,
                     atom.created_at, atom.last_accessed_at, atom.ttl_days,
                     atom.status.value, atom.session_id, atom.diary_ref,
+                    atom.diary_snippet,
                     json.dumps(atom.metadata, ensure_ascii=False),
                 ))
                 atom_id = cursor.lastrowid
@@ -256,5 +269,6 @@ class AtomStore:
             status=AtomStatus(row[12]),
             session_id=row[13],
             diary_ref=row[14],
-            metadata=json.loads(row[17]) if isinstance(row[17], str) and row[17] else {},
+            diary_snippet=row[15] or "",
+            metadata=json.loads(row[18]) if isinstance(row[18], str) and row[18] else {},
         )

@@ -180,6 +180,7 @@ class Capturer:
                             importance=float(item.get("importance", 0.5)),
                             entities=item.get("entities", []),
                             confidence=float(item.get("confidence", 0.7)),
+                            diary_snippet=item.get("diary_snippet", ""),
                         ))
         except Exception:
             pass

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api import logger
 
 from .core.memory_core import MemoryCore
@@ -28,7 +26,7 @@ class MemoryPlugin(Star):
 
     async def initialize(self):
         """插件初始化"""
-        data_dir = self._get_data_dir()
+        data_dir = str(StarTools.get_data_dir())
         logger.info(f"[Memory] 初始化中，数据目录: {data_dir}")
 
         self.memory_core = MemoryCore(
@@ -38,14 +36,6 @@ class MemoryPlugin(Star):
         )
         await self.memory_core.initialize()
         logger.info("[Memory] 初始化完成！")
-
-    def _get_data_dir(self) -> str:
-        """获取插件数据目录"""
-        # 优先使用插件配置中的路径
-        if self.config and self.config.get("data_dir"):
-            return self.config["data_dir"]
-        # 默认 AstrBot 插件数据目录
-        return str(Path(__file__).parent / "data")
 
     async def on_astrbot_llm_request(self, event: AstrMessageEvent):
         """在 LLM 请求前注入记忆（兼容 AstrBot 新版事件）"""

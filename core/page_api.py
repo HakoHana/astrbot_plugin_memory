@@ -175,7 +175,7 @@ class PageApi:
             rows = await self._fetch(f"""
                 SELECT d.id, d.date, d.content, d.created_at, d.updated_at, COALESCE(d.status,'active'),
                        (SELECT COUNT(*) FROM memory_atoms a WHERE a.diary_date=d.date AND a.user_id=d.user_id AND a.status='active'),
-                       (SELECT ROUND(AVG(a.importance),2) FROM memory_atoms a WHERE a.diary_date=d.date AND a.user_id=d.user_id AND a.status='active')
+                       d.importance
                 FROM diary_entries d WHERE {where}
                 ORDER BY d.id DESC LIMIT ? OFFSET ?
             """, params + [page_size, (page - 1) * page_size])

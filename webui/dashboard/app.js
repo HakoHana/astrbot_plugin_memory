@@ -281,7 +281,8 @@ async function loadMemories() {
     var kw = document.getElementById("mem-search").value;
     var y = document.getElementById("mem-year").value;
     var m = document.getElementById("mem-month").value;
-    var url = "/memories?page=" + memPage + "&page_size=30";
+    var ps = (document.getElementById("mem-page-size")||{}).value || 50;
+    var url = "/memories?page=" + memPage + "&page_size=" + ps;
     if (kw) url += "&keyword=" + encodeURIComponent(kw);
     if (y) url += "&year=" + y;
     if (m) url += "&month=" + m;

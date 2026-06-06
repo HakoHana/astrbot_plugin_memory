@@ -65,7 +65,14 @@
             </thead>
             <tbody id="mem-tbody"></tbody>
           </table>
-          <div class="pagination" id="mem-pagination"></div>
+          <div style="display:flex;align-items:center;gap:8px;justify-content:center;padding:12px 0">
+            <div class="pagination" id="mem-pagination" style="padding:0"></div>
+            <select id="mem-page-size" onchange="memPage=1;loadMemories()" style="padding:4px 8px;font-size:0.85em">
+              <option value="20">20条/页</option>
+              <option value="50" selected>50条/页</option>
+              <option value="100">100条/页</option>
+            </select>
+          </div>
         </div>
         <div class="mem-side" id="mem-side" style="display:none">
           <div class="side-header">

@@ -1327,24 +1327,14 @@
   /* ================================================================
      Init
      ================================================================ */
-  function initDebug(msg, err) {
-    var el = document.getElementById("graph-canvas-state");
-    if (!el) return;
-    el.textContent = (err ? "❌ " : "🔄 ") + msg;
-    if (err) el.style.color = "var(--danger)";
-  }
-
   async function init() {
     try {
-      initDebug("初始化...");
       applyTheme(readTheme());
       listenBridgeTheme();
 
       var bridge = window.AstrBotPluginPage;
-      initDebug("桥接: " + (bridge ? "可用" : "不可用 — API无法工作"));
-
       if (bridge && typeof bridge.ready === "function") {
-        try { await bridge.ready(); initDebug("桥接就绪"); } catch (_) { initDebug("桥接等待跳过"); }
+        try { await bridge.ready(); } catch (_) {}
       }
 
       initSidebar();
@@ -1364,19 +1354,9 @@
         }
       });
 
-      initDebug("测试API...");
-      try {
-        var testData = unwrapApiData(await apiRequest("stats")) || {};
-        initDebug("API OK, 原子:" + ((testData.atoms && testData.atoms.total) || "?"));
-      } catch (e) {
-        initDebug("API失败: " + (e.message || e), true);
-      }
-
-      initDebug("加载数据...");
       fetchGraphStats();
       switchPage("graph");
     } catch (e) {
-      initDebug("初始化失败: " + (e.message || e), true);
       console.error("Init error:", e);
     }
   }

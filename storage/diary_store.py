@@ -34,12 +34,7 @@ class DiaryStore(BaseDbStore):
                 CREATE INDEX IF NOT EXISTS idx_diary_user_date
                 ON diary_entries(user_id, date)
             """)
-            # 兼容旧表：添加可能缺失的列
-            for col in ["topics", "sentiment", "importance", "atom_count", "status"]:
-                try:
-                    await db.execute(f"ALTER TABLE diary_entries ADD COLUMN {col}")
-                except Exception:
-                    pass
+            # 列补齐已在 db_migration.py 中集中管理
             await db.commit()
 
     async def append(self, user_id: str, date_str: str, content: str):

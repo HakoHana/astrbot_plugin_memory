@@ -6,6 +6,8 @@ import asyncio
 import time
 from typing import Any, Callable
 
+from astrbot.api import logger
+
 from ..models.memory_atom import PersistedSessionState, CaptureResult
 from ..storage.state_store import StateStore
 from .capturer import Capturer
@@ -20,9 +22,13 @@ class ConsolidationManager:
     - L1 = Capturer（判断+写日记+提取原子）
     - L3 = PersonaEngine（画像更新）
     - 暖启动：新用户阈值从 1→2→4→8 指数增长
-    - 空闲超时兜底：沉默一段时间后自动整理
-    - 会话状态持久化：每次操作后写入数据库
-    - 重试机制：LLM 失败后自动重试
+    - 空闲超时兜底
+    - 会话状态持久化（带延迟写入去抖）
+
+    优化：
+    - 状态写入用延迟去抖（不是每次 on_message 都写）
+    - 空闲定时器不随每条消息重启（用 check-interval 轮询）
+    - 重试机制带指数退避
     """
 
     def __init__(
@@ -36,7 +42,7 @@ class ConsolidationManager:
         self.capturer = capturer
         self.persona_engine = persona_engine
         self.state_store = state_store
-        self.on_memory_created = on_memory_created  # 回调：当新记忆产生时通知
+        self.on_memory_created = on_memory_created
         self.config = config or {}
 
         # 配置
@@ -48,70 +54,95 @@ class ConsolidationManager:
         self.persona_update_interval = self.config.get("persona_update_interval", 10)
         self.max_l1_retries = self.config.get("max_l1_retries", 3)
 
-        # 内存中的会话状态（启动时从数据库恢复）
+        # 会话状态（内存中，延迟写回）
         self._states: dict[str, PersistedSessionState] = {}
+        # 延迟写入追踪
+        self._dirty_users: set[str] = set()
+        self._flush_task: asyncio.Task | None = None
+        self._flush_interval: float = 5.0  # 每 5 秒批量刷一次脏状态
 
-        # 空闲超时定时器
-        self._idle_timers: dict[str, asyncio.Task] = {}
+        # 空闲检测：轮询任务，不随每条消息重启定时器
+        self._idle_check_task: asyncio.Task | None = None
+        self._idle_check_interval: float = 60.0  # 每 60 秒检查一次
+        self._last_activity: dict[str, float] = {}
 
-        # 是否已销毁
         self._destroyed = False
 
     async def initialize(self):
         """从数据库恢复所有会话状态"""
         states = await self.state_store.load_all()
         self._states = states
+        now = time.time()
         for uid in states:
             if states[uid].msg_count > 0:
-                self._start_idle_timer(uid)
+                self._last_activity[uid] = now
+
+        # 启动延迟刷写任务
+        self._flush_task = asyncio.create_task(self._flush_loop())
+        # 启动空闲检测轮询
+        self._idle_check_task = asyncio.create_task(self._idle_check_loop())
 
     async def destroy(self):
         """销毁调度器"""
         self._destroyed = True
-        for task in self._idle_timers.values():
-            task.cancel()
-        self._idle_timers.clear()
+        # 取消后台任务
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+        if self._idle_check_task and not self._idle_check_task.done():
+            self._idle_check_task.cancel()
+
+        # 强制刷写所有脏状态
+        if self._dirty_users:
+            await self._flush_dirty_states()
+
         # 持久化所有状态
         for uid, state in self._states.items():
             await self.state_store.save(state)
+        self._states.clear()
+        self._dirty_users.clear()
 
     async def on_message(self, user_id: str, conversation_text: str) -> CaptureResult | None:
         """
         每次消息调用：计数 + 判断是否触发
 
-        返回 CaptureResult 表示是否写了日记，None 表示未触发
+        优化：非触发类的消息仅更新脏标记，不立即写 DB
         """
         if self._destroyed:
             return None
 
         state = self._get_or_create_state(user_id)
         state.msg_count += 1
+        self._mark_dirty(user_id)
+        self._last_activity[user_id] = time.time()
 
         # 检查触发条件
         should_trigger = False
         trigger_reason = ""
 
-        # 条件 A：消息数达到阈值
-        threshold = state.warmup_threshold if self.warmup_enabled and state.warmup_threshold > 0 else self.trigger_msg_count
+        # A：消息数达到阈值
+        threshold = (
+            state.warmup_threshold
+            if self.warmup_enabled and state.warmup_threshold > 0
+            else self.trigger_msg_count
+        )
         if state.msg_count >= threshold:
             should_trigger = True
             trigger_reason = f"消息数达到 {threshold}"
 
-        # 条件 B：即时捕捉（重要事件）
+        # B：即时捕捉（重要事件）
         if self.immediate_capture and not should_trigger:
             try:
                 judge = await self.capturer.should_capture(conversation_text)
                 if judge.should_remember and judge.importance >= 0.7:
                     should_trigger = True
                     trigger_reason = f"即时捕捉: {judge.reason}"
-                    # 即时捕捉直接调用 capture（跳过判断步骤）
                     result = await self.capturer.capture(user_id, conversation_text, judge)
                     await self._after_consolidation(user_id, result)
                     return result
             except Exception:
                 pass
 
-        # 条件 C：时间间隔
+        # C：时间间隔
         if not should_trigger and self.trigger_time_minutes > 0:
             elapsed = time.time() - state.last_consolidated_at
             if elapsed >= self.trigger_time_minutes * 60:
@@ -119,29 +150,26 @@ class ConsolidationManager:
                 trigger_reason = f"时间间隔达到 {self.trigger_time_minutes} 分钟"
 
         if not should_trigger:
-            # 持久化状态（仅在计数变化时）
-            await self.state_store.save(state)
+            # 延迟写入会在 _flush_loop 中处理
+            logger.debug(f"[Memory] 触发条件未满足: uid={user_id}, count={state.msg_count}/{threshold}")
             return None
+
+        logger.info(f"[Memory] 触发整理: {trigger_reason}")
 
         # 执行 L1 整理
-        # 先判断（除非已经是即时捕捉判断过的）
         judge = await self.capturer.should_capture(conversation_text)
         if not judge.should_remember:
-            # 不值得记，但更新状态防止一直触发
             state.last_consolidated_at = time.time()
             state.l1_retry_count = 0
-            await self.state_store.save(state)
+            self._mark_dirty(user_id)
             return None
 
-        # 执行完整 capture
         result = await self._run_l1_with_retry(user_id, conversation_text, judge)
         await self._after_consolidation(user_id, result)
         return result
 
-    async def _run_l1_with_retry(
-        self, user_id: str, conversation: str, judge
-    ) -> CaptureResult:
-        """带重试的 L1 执行"""
+    async def _run_l1_with_retry(self, user_id: str, conversation: str, judge) -> CaptureResult:
+        """带重试的 L1 执行（指数退避）"""
         state = self._get_or_create_state(user_id)
         last_error = None
 
@@ -149,94 +177,119 @@ class ConsolidationManager:
             try:
                 result = await self.capturer.capture(user_id, conversation, judge)
                 state.l1_retry_count = 0
+                self._mark_dirty(user_id)
                 return result
             except Exception as e:
                 last_error = e
                 state.l1_retry_count += 1
-                await self.state_store.save(state)
+                self._mark_dirty(user_id)
                 if attempt < self.max_l1_retries:
-                    await asyncio.sleep(2 ** attempt * 5)  # 指数退避
+                    delay = min(2 ** attempt * 5, 30)  # 上限 30 秒
+                    logger.warning(f"[Memory] L1 重试 {attempt+1}/{self.max_l1_retries}: {e}, 等待 {delay}s")
+                    await asyncio.sleep(delay)
 
-        # 重试全部失败
+        logger.error(f"[Memory] L1 重试全部失败: {last_error}")
         return CaptureResult(wrote_diary=False)
 
     async def _after_consolidation(self, user_id: str, result: CaptureResult):
         """整理后的收尾工作"""
         state = self._get_or_create_state(user_id)
-
-        # 更新状态
-        state.last_consolidated_at = time.time()
-        if result.wrote_diary:
-            state.last_diary_date = time.strftime("%Y-%m-%d")
-            state.diary_count += 1
-            state.diary_count_since_persona += 1
-
-        # 重置计数
-        state.msg_count = 0
+        state.reset_after_consolidation()
 
         # 暖启动：阈值指数增长
         if self.warmup_enabled and state.warmup_threshold > 0:
             new_threshold = min(state.warmup_threshold * 2, self.trigger_msg_count)
-            if new_threshold >= self.trigger_msg_count:
-                state.warmup_threshold = 0  # 暖启动完成
-            else:
-                state.warmup_threshold = new_threshold
+            state.warmup_threshold = 0 if new_threshold >= self.trigger_msg_count else new_threshold
 
-        # 检查是否需要触发 L3（画像更新）
+        # 检查 L3（画像更新）
         if state.diary_count_since_persona >= self.persona_update_interval:
             try:
                 await self.persona_engine.update_persona(user_id)
                 state.diary_count_since_persona = 0
-            except Exception:
-                pass
+                logger.info(f"[Memory] 画像已更新: {user_id}")
+            except Exception as e:
+                logger.warning(f"[Memory] L3 画像更新失败: {e}")
 
-        # 持久化状态
-        await self.state_store.save(state)
+        self._mark_dirty(user_id)
 
-        # 重启空闲定时器
-        self._start_idle_timer(user_id)
-
-        # 通知外部（有新记忆了）
+        # 通知外部
         if self.on_memory_created and result.wrote_diary:
             try:
-                if asyncio.iscoroutinefunction(self.on_memory_created):
-                    await self.on_memory_created(user_id, result)
+                cb = self.on_memory_created
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(user_id, result)
                 else:
-                    self.on_memory_created(user_id, result)
+                    cb(user_id, result)
             except Exception:
                 pass
 
-    def _start_idle_timer(self, user_id: str):
-        """启动空闲超时定时器"""
-        # 取消旧的定时器
-        old = self._idle_timers.get(user_id)
-        if old and not old.done():
-            old.cancel()
+    # ═══════════════════════════════════════════════════
+    #  延迟刷写
+    # ═══════════════════════════════════════════════════
 
-        # 创建新的定时器
-        timeout = self.idle_timeout_minutes * 60
-        self._idle_timers[user_id] = asyncio.create_task(
-            self._idle_timeout_task(user_id, timeout)
-        )
+    def _mark_dirty(self, user_id: str):
+        """标记用户状态为脏（需要刷写）"""
+        self._dirty_users.add(user_id)
 
-    async def _idle_timeout_task(self, user_id: str, timeout: float):
-        """空闲超时任务"""
-        try:
-            await asyncio.sleep(timeout)
-            if self._destroyed:
-                return
+    async def _flush_loop(self):
+        """后台循环：定期刷写脏状态"""
+        while not self._destroyed:
+            try:
+                await asyncio.sleep(self._flush_interval)
+                if self._dirty_users:
+                    await self._flush_dirty_states()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
 
-            state = self._get_or_create_state(user_id)
-            if state.msg_count > 0:
-                # 空闲超时触发
-                judge = await self.capturer.should_capture("")
-                if judge.should_remember:
-                    result = await self._run_l1_with_retry(user_id, "", judge)
-                    await self._after_consolidation(user_id, result)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
+    async def _flush_dirty_states(self):
+        """批量刷写所有脏状态"""
+        dirty = list(self._dirty_users)
+        self._dirty_users.clear()
+        for uid in dirty:
+            state = self._states.get(uid)
+            if state:
+                try:
+                    await self.state_store.save(state)
+                except Exception as e:
+                    logger.warning(f"[Memory] 状态刷写失败 {uid}: {e}")
+                    self._dirty_users.add(uid)
+
+    # ═══════════════════════════════════════════════════
+    #  空闲检测（轮询模式，不依赖定时器重启）
+    # ═══════════════════════════════════════════════════
+
+    async def _idle_check_loop(self):
+        """后台轮询：检查是否有用户超时未活动"""
+        timeout_sec = self.idle_timeout_minutes * 60
+        while not self._destroyed:
+            try:
+                await asyncio.sleep(self._idle_check_interval)
+                now = time.time()
+                for uid, last_active in list(self._last_activity.items()):
+                    if self._destroyed:
+                        return
+                    if now - last_active < timeout_sec:
+                        continue
+                    state = self._states.get(uid)
+                    if state and state.msg_count > 0:
+                        logger.info(f"[Memory] 空闲超时触发: {uid}, 未处理消息: {state.msg_count}")
+                        try:
+                            judge = await self.capturer.should_capture("")
+                            if judge.should_remember:
+                                result = await self._run_l1_with_retry(uid, "", judge)
+                                await self._after_consolidation(uid, result)
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
+    # ═══════════════════════════════════════════════════
+    #  状态管理
+    # ═══════════════════════════════════════════════════
 
     def _get_or_create_state(self, user_id: str) -> PersistedSessionState:
         """获取或创建会话状态"""

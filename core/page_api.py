@@ -13,7 +13,11 @@ if TYPE_CHECKING:
 
 
 class PageApi:
-    """Memory 插件 Dashboard API"""
+    """Memory 插件 Dashboard API
+
+    优化：所有数据库操作通过 Store 层的异步连接池执行，
+    不再创建独立的 sync sqlite3 连接。
+    """
 
     def __init__(self, memory_core: MemoryCore):
         self.core = memory_core
@@ -40,6 +44,23 @@ class PageApi:
         register(f"{prefix}/persona/update", self.update_persona, ["POST"], "Update persona")
         register(f"{prefix}/import/livingmemory", self.import_livingmemory, ["POST"], "Import from livingmemory")
         register(f"{prefix}/providers", self.list_providers, ["GET"], "List LLM providers")
+
+    # ── 复用 Store 的异步连接池 ──
+
+    @property
+    def _db(self):
+        """获取 atom_store 的底层 DB 连接（共享连接池）"""
+        return self.core.atom_store
+
+    async def _fetch(self, sql: str, params: tuple | list | None = None) -> list:
+        """通过共享连接池执行异步查询"""
+        return await self._db.fetch(sql, params)
+
+    async def _execute(self, sql: str, params: tuple | list | None = None):
+        """通过共享连接池执行异步写入"""
+        return await self._db.execute(sql, params)
+
+    # ── API 处理 ──
 
     async def list_providers(self):
         """列出 AstrBot 中已配置的 LLM Provider"""
@@ -106,6 +127,7 @@ class PageApi:
             return self._error(str(e))
 
     async def list_memories(self):
+        """列出所有日记（分页 + 过滤 + 原子统计）"""
         try:
             from quart import request
             q = request.args
@@ -116,12 +138,8 @@ class PageApi:
             page = max(1, int(q.get("page", 1)))
             page_size = min(200, max(1, int(q.get("page_size", 50))))
 
-            import sqlite3
-            db = self.core.atom_store.db_path
-            conn = sqlite3.connect(db)
-
             conditions = ["d.user_id = ?"]
-            params = [user_id]
+            params: list = [user_id]
             if year:
                 conditions.append("substr(d.date,1,4) = ?")
                 params.append(year)
@@ -137,16 +155,18 @@ class PageApi:
                     params.append(f"%{keyword}%")
 
             where = " AND ".join(conditions)
-            cursor = conn.execute(f"""
+            rows = await self._fetch(f"""
                 SELECT d.id, d.date, d.content, d.created_at, d.updated_at, COALESCE(d.status,'active'),
                        (SELECT COUNT(*) FROM memory_atoms a WHERE a.diary_id=d.id AND a.status='active'),
                        (SELECT ROUND(AVG(a.importance),2) FROM memory_atoms a WHERE a.diary_id=d.id AND a.status='active')
                 FROM diary_entries d WHERE {where}
                 ORDER BY d.id DESC LIMIT ? OFFSET ?
-            """, params + [page_size, (page-1)*page_size])
-            rows = cursor.fetchall()
-            total = conn.execute(f"SELECT COUNT(*) FROM diary_entries d WHERE {where}", params).fetchone()[0]
-            conn.close()
+            """, params + [page_size, (page - 1) * page_size])
+
+            total_row = await self._fetch(
+                f"SELECT COUNT(*) FROM diary_entries d WHERE {where}", params
+            )
+            total = total_row[0][0] if total_row else 0
 
             items = []
             for r in rows:
@@ -158,21 +178,25 @@ class PageApi:
                     "id": did, "date": dt, "content": preview,
                     "created_at": cts, "updated_at": uts or cts,
                     "status": st, "atom_count": acnt, "avg_importance": aimp,
-                    "types": self._get_atom_types_for_date(dt, did),
+                    "types": await self._get_atom_types_for_date(dt, did),
                 })
             return self._ok({"total": total, "page": page, "page_size": page_size, "items": items})
         except Exception as e:
             return self._error(str(e))
 
-    def _get_atom_types_for_date(self, date_str: str, diary_id: int = 0) -> list:
+    async def _get_atom_types_for_date(self, date_str: str, diary_id: int = 0) -> list:
+        """获取某日期下原子的类型分布"""
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.core.atom_store.db_path)
             if diary_id:
-                rows = conn.execute("SELECT atom_type, COUNT(*) FROM memory_atoms WHERE diary_id=? AND status='active' GROUP BY atom_type ORDER BY COUNT(*) DESC", (diary_id,)).fetchall()
+                rows = await self._fetch(
+                    "SELECT atom_type, COUNT(*) FROM memory_atoms WHERE diary_id=? AND status='active' GROUP BY atom_type ORDER BY COUNT(*) DESC",
+                    (diary_id,),
+                )
             else:
-                rows = conn.execute("SELECT atom_type, COUNT(*) FROM memory_atoms WHERE diary_date=? AND status='active' GROUP BY atom_type ORDER BY COUNT(*) DESC", (date_str,)).fetchall()
-            conn.close()
+                rows = await self._fetch(
+                    "SELECT atom_type, COUNT(*) FROM memory_atoms WHERE diary_date=? AND status='active' GROUP BY atom_type ORDER BY COUNT(*) DESC",
+                    (date_str,),
+                )
             return [{"type": r[0], "count": r[1]} for r in rows]
         except Exception:
             return []
@@ -210,50 +234,54 @@ class PageApi:
             from quart import request
             body = await request.get_json()
             diary_id = body.get("id", 0)
-            import sqlite3
-            db = self.core.atom_store.db_path
-            conn = sqlite3.connect(db)
-            row = conn.execute("SELECT date FROM diary_entries WHERE id=?", (diary_id,)).fetchone()
+
+            row = await self._fetch(
+                "SELECT date FROM diary_entries WHERE id=?", (diary_id,)
+            )
             if row:
-                conn.execute("DELETE FROM diary_entries WHERE id=?", (diary_id,))
-                conn.execute("DELETE FROM memory_atoms WHERE diary_date=? AND user_id=?", (row[0], "Hana"))
-            conn.commit()
-            conn.close()
+                date_str = row[0][0]
+                await self._execute("DELETE FROM diary_entries WHERE id=?", (diary_id,))
+                await self._execute(
+                    "DELETE FROM memory_atoms WHERE diary_date=? AND user_id=?",
+                    (date_str, "Hana"),
+                )
             return self._ok({"deleted": True})
         except Exception as e:
             return self._error(str(e))
 
     async def batch_delete_memories(self):
+        """批量删除日记"""
         try:
             from quart import request
             body = await request.get_json()
             ids = body.get("ids", [])
-            import sqlite3
-            db = self.core.atom_store.db_path
-            conn = sqlite3.connect(db)
+
             for did in ids:
-                row = conn.execute("SELECT date FROM diary_entries WHERE id=?", (did,)).fetchone()
+                row = await self._fetch(
+                    "SELECT date FROM diary_entries WHERE id=?", (did,)
+                )
                 if row:
-                    conn.execute("DELETE FROM diary_entries WHERE id=?", (did,))
-                    conn.execute("DELETE FROM memory_atoms WHERE diary_date=? AND user_id=?", (row[0], "Hana"))
-            conn.commit()
-            conn.close()
+                    date_str = row[0][0]
+                    await self._execute("DELETE FROM diary_entries WHERE id=?", (did,))
+                    await self._execute(
+                        "DELETE FROM memory_atoms WHERE diary_date=? AND user_id=?",
+                        (date_str, "Hana"),
+                    )
             return self._ok({"deleted": len(ids)})
         except Exception as e:
             return self._error(str(e))
 
     async def update_diary_status(self):
+        """更新日记状态"""
         try:
             from quart import request
             body = await request.get_json()
             diary_id = body.get("id", 0)
-            status = body.get("status", "active")
-            import sqlite3, time
-            db = self.core.atom_store.db_path
-            conn = sqlite3.connect(db)
-            conn.execute("UPDATE diary_entries SET status=?, updated_at=? WHERE id=?", (status, time.time(), diary_id))
-            conn.commit()
-            conn.close()
+            status_val = body.get("status", "active")
+            await self._execute(
+                "UPDATE diary_entries SET status=?, updated_at=? WHERE id=?",
+                (status_val, time.time(), diary_id),
+            )
             return self._ok({"updated": True})
         except Exception as e:
             return self._error(str(e))
@@ -267,7 +295,6 @@ class PageApi:
             page = max(1, int(q.get("page", 1)))
             page_size = min(100, max(1, int(q.get("page_size", 20))))
             data = await self.core.atom_store.get_timeline(user_id, page, page_size)
-            # 补充日记预览
             for item in data["items"]:
                 diary = await self.core.diary_store.read(user_id, item["date"])
                 item["diary_preview"] = (diary[:200] if diary else "") if diary else ""
@@ -283,41 +310,36 @@ class PageApi:
             q = request.args
             did = int(q.get("did", 0))
 
-            import sqlite3
-            db = self.core.atom_store.db_path
-            conn = sqlite3.connect(db)
-
             # 读日记
-            diary = conn.execute("SELECT id, date, content, topics, sentiment, status FROM diary_entries WHERE id=?", (did,)).fetchone()
+            diary = await self._fetch(
+                "SELECT id, date, content, topics, sentiment, status FROM diary_entries WHERE id=?",
+                (did,),
+            )
             if not diary:
-                conn.close()
                 return self._error("未找到该日记")
 
-            did_val, date_str, content, topics, sentiment, status = diary
+            row = diary[0]
+            did_val, date_str, content, topics, sentiment, status = row
             status = status or "active"
 
             # 读该日记关联的原子
-            atom_rows = conn.execute("""
+            atoms = []
+            atom_rows = await self._fetch("""
                 SELECT id, content, atom_type, importance, diary_snippet
                 FROM memory_atoms WHERE diary_id=? AND status='active'
                 ORDER BY importance DESC
-            """, (did,)).fetchall()
-
-            atoms = []
+            """, (did,))
             for r in atom_rows:
                 atoms.append({
                     "id": r[0], "content": r[1], "type": r[2],
                     "importance": r[3], "snippet": r[4] or "",
                 })
 
-            # 重要度统计
             imp_stats = {"avg": 0, "max": 0, "count": len(atoms)}
             if atoms:
                 imps = [a["importance"] for a in atoms]
-                imp_stats["avg"] = round(sum(imps)/len(imps), 2)
+                imp_stats["avg"] = round(sum(imps) / len(imps), 2)
                 imp_stats["max"] = max(imps)
-
-            conn.close()
 
             return self._ok({
                 "date": date_str,

@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
+
+from astrbot.api import logger
 
 from ..models.memory_atom import CaptureResult
 from ..storage.atom_store import AtomStore
 from ..storage.diary_store import DiaryStore
 from ..storage.persona_store import PersonaStore
 from ..storage.state_store import StateStore
-from astrbot.api import logger
+from ..storage.conversation_store import ConversationStore
+from ..storage.write_op_log import WriteOpLog
 from ..storage.graph_store import GraphStore
+from ..storage.index_validator import IndexValidator
+from ..storage.db_migration import DBMigration
+from ..storage.base_store import BaseDbStore
 from ..core.graph_engine import GraphEngine
 from .adapters import LLMProvider, AstrBotLLMProvider, AstrBotContextProvider
 from .capturer import Capturer
@@ -52,13 +59,14 @@ class MemoryCore:
         self.command_handler: CommandHandler | None = None
         self.graph_store: GraphStore | None = None
         self.graph_engine: GraphEngine | None = None
+        self.conversation_store: ConversationStore | None = None
+        self.write_op_log: WriteOpLog | None = None
 
     async def initialize(self):
         """初始化所有模块"""
         if self._initialized:
             return
 
-        # 创建数据目录
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         prompts_dir = str(Path(__file__).parent.parent / "prompts")
@@ -68,26 +76,57 @@ class MemoryCore:
         self.llm_provider = AstrBotLLMProvider(self.plugin_context)
         self.context_provider = AstrBotContextProvider()
 
-        # 2. 存储层
+        # 2. 数据库迁移（失败不阻塞启动）
+        try:
+            migration = DBMigration(db_path)
+            await migration.initialize()
+            await migration.migrate()
+            logger.info("[Memory] 数据库迁移完成")
+        except Exception as e:
+            logger.warning(f"[Memory] 数据库迁移失败（不影响启动）: {e}")
+
+        # 3. 存储层（统一 db_path，共享连接池）
         self.atom_store = AtomStore(db_path)
         self.diary_store = DiaryStore(db_path)
         self.persona_store = PersonaStore(str(self.data_dir))
         self.state_store = StateStore(db_path)
         self.graph_store = GraphStore(db_path)
+        self.conversation_store = ConversationStore(db_path)
+        self.write_op_log = WriteOpLog(db_path)
 
-        await self.atom_store.initialize()
-        await self.diary_store.initialize()
-        await self.state_store.initialize()
-        await self.graph_store.initialize()
+        # 并行初始化存储层（都是 I/O 密集，可并发）
+        init_tasks = [
+            self.atom_store.initialize(),
+            self.diary_store.initialize(),
+            self.state_store.initialize(),
+            self.graph_store.initialize(),
+            self.conversation_store.initialize(),
+            self.write_op_log.initialize(),
+        ]
+        await asyncio.gather(*init_tasks, return_exceptions=True)
+        # 记录失败的初始化
+        for i, task in enumerate(init_tasks):
+            if isinstance(task, Exception):
+                store_name = ["atom_store", "diary_store", "state_store", "graph_store", "conversation_store", "write_op_log"][i]
+                logger.warning(f"[Memory] {store_name} 初始化异常: {task}")
 
-        # 3. 图谱引擎
+        # 启动时修复未完成的写操作
+        try:
+            await self.write_op_log.repair_on_startup()
+        except Exception as e:
+            logger.warning(f"[Memory] 写操作日志修复失败: {e}")
+
+        # 索引一致性检查（异步，不阻塞初始化）
+        asyncio.ensure_future(self._async_index_check(db_path))
+
+        # 4. 图谱引擎
         self.graph_engine = GraphEngine(
             graph_store=self.graph_store,
             atom_store=self.atom_store,
             diary_store=self.diary_store,
         )
 
-        # 4. 核心业务模块
+        # 5. 核心业务模块
         self.capturer = Capturer(
             llm_provider=self.llm_provider,
             diary_store=self.diary_store,
@@ -95,6 +134,7 @@ class MemoryCore:
             prompts_dir=prompts_dir,
             config=self.config,
             on_atoms_created=self.graph_engine.index_atom,
+            write_op_log=self.write_op_log,
         )
         self.persona_engine = PersonaEngine(
             llm_provider=self.llm_provider,
@@ -112,7 +152,7 @@ class MemoryCore:
         )
         self.injector = MemoryInjector(self.config)
 
-        # 4. 调度器
+        # 6. 调度器
         self.consolidation_manager = ConsolidationManager(
             capturer=self.capturer,
             persona_engine=self.persona_engine,
@@ -121,15 +161,15 @@ class MemoryCore:
         )
         await self.consolidation_manager.initialize()
 
-        # 5. WebUI API
-        from .page_api import PageApi
-        self.page_api = PageApi(self)
+        # 7. WebUI API
         try:
+            from .page_api import PageApi
+            self.page_api = PageApi(self)
             self.page_api.register_routes(self.plugin_context)
         except Exception as e:
             logger.warning(f"[Memory] 注册 WebUI API 失败: {e}")
 
-        # 6. 指令处理器
+        # 8. 指令处理器
         self.command_handler = CommandHandler(
             diary_store=self.diary_store,
             atom_store=self.atom_store,
@@ -137,15 +177,34 @@ class MemoryCore:
             retriever=self.retriever,
         )
 
-        # 应用 provider 配置
         self._apply_provider_config()
-
         self._initialized = True
 
+    async def _async_index_check(self, db_path: str):
+        """后台索引一致性检查（不阻塞启动）"""
+        try:
+            validator = IndexValidator(db_path)
+            await validator.initialize()
+            results = await validator.validate_all()
+            if not results["summary"]["all_passed"]:
+                for name, r in results.items():
+                    if name != "summary" and not r.get("passed", False):
+                        for issue in r.get("issues", []):
+                            logger.warning(f"[Memory] 索引检查: {issue}")
+        except Exception as e:
+            logger.warning(f"[Memory] 索引检查失败: {e}")
+
     async def destroy(self):
-        """优雅关闭"""
+        """优雅关闭所有模块"""
         if self.consolidation_manager:
             await self.consolidation_manager.destroy()
+
+        # 关闭数据库连接池
+        try:
+            await BaseDbStore.close_all()
+        except Exception as e:
+            logger.warning(f"[Memory] 关闭连接池异常: {e}")
+
         self._initialized = False
 
     async def on_message(self, event) -> str | None:
@@ -156,9 +215,6 @@ class MemoryCore:
         1. 检索相关记忆并注入
         2. 判断是否需要整理
         3. 处理指令
-
-        返回注入后的文本（如果是注入到用户消息前的情况），
-        或者 None（系统提示词注入时由插件自己处理）
         """
         if not self._initialized:
             return None
@@ -178,10 +234,9 @@ class MemoryCore:
         recall_result = await self.retriever.get_context_memories(user_id, message_text)
 
         if recall_result.memory_text or recall_result.persona_text:
-            # 获取系统提示词（从 AstrBot 上下文）
             system_prompt = getattr(event, "system_prompt", "") or ""
             user_message = message_text
-            user_name = user_id  # 可以用昵称映射，暂时简单处理
+            user_name = user_id
 
             new_system, new_user = self.injector.inject(
                 memory_text=recall_result.memory_text,
@@ -191,18 +246,16 @@ class MemoryCore:
                 user_name=user_name,
             )
 
-            # 如果 system_prompt 变了，更新 event
             if new_system != system_prompt:
                 event.system_prompt = new_system
 
-            # 如果 user_message 变了并且是前缀注入，返回修改后的消息
             if new_user != user_message:
                 return new_user
 
         return None
 
     async def trigger_capture(self, user_id: str, text: str):
-        """触发记忆整理（由 on_llm_response 调用）"""
+        """后台触发记忆整理"""
         try:
             asyncio.ensure_future(
                 self.consolidation_manager.on_message(user_id, text)
@@ -230,7 +283,6 @@ class MemoryCore:
 
         handler = handler_map.get(cmd)
         if not handler:
-            # /日记 带参数的兼容处理
             if cmd == "/日记" and args:
                 handler = self.command_handler.handle_diary
             else:
@@ -238,11 +290,10 @@ class MemoryCore:
 
         try:
             result = await handler(user_id, args)
-            # 通过 AstrBot API 发送回复
             if hasattr(self.plugin_context, "reply"):
                 await self.plugin_context.reply(result)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[Memory] 指令处理失败 {cmd}: {e}")
 
     def reload_config(self, config: dict[str, Any]):
         """热加载配置"""
@@ -250,7 +301,6 @@ class MemoryCore:
         if self.injector:
             self.injector.reload_config(self.config)
         if self.consolidation_manager:
-            # 更新调度器配置
             cm = self.consolidation_manager
             cm.trigger_msg_count = config.get("trigger_msg_count", cm.trigger_msg_count)
             cm.trigger_time_minutes = config.get("trigger_time_minutes", cm.trigger_time_minutes)

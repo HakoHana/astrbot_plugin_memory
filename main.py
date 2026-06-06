@@ -10,13 +10,14 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api import logger
 
 from .core.memory_core import MemoryCore
+from .core.memory_tools import RecallMemoryTool, MemorizeMemoryTool
 
 
 @register(
     name="Memory",
     author="your_name",
     desc="日记式长期记忆插件 — 让 Bot 记住与用户的每一刻",
-    version="0.1.0",
+    version="0.2.0",
     repo="https://github.com/your_name/astrbot_plugin_memory",
 )
 class MemoryPlugin(Star):
@@ -29,77 +30,85 @@ class MemoryPlugin(Star):
 
     async def initialize(self):
         data_dir = str(StarTools.get_data_dir())
-        logger.info(f"[Memory] init: {data_dir}")
+        logger.info(f"[Memory] 初始化: {data_dir}")
         self.memory_core = MemoryCore(
             plugin_context=self.context,
             data_dir=data_dir,
             config=self.config,
         )
         await self.memory_core.initialize()
-        logger.info("[Memory] init done")
+        try:
+            self.context.add_llm_tools(
+                RecallMemoryTool(self.memory_core),
+                MemorizeMemoryTool(self.memory_core),
+            )
+            logger.info("[Memory] Agent Tools 已注册")
+        except Exception as e:
+            logger.warning(f"[Memory] 注册 Agent Tools 失败: {e}")
+        logger.info("[Memory] 初始化完成")
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        try:
-            with open("/tmp/md.log", "a") as f:
-                f.write("on_llm_request|called\n")
-        except:
-            pass
         if not self.memory_core:
             return
         try:
+            # 存储用户消息到会话
+            cs = self.memory_core.conversation_store
+            if cs:
+                sid = await cs.get_session_id(event)
+                uid = await cs.get_user_id(event)
+                txt = event.get_message_str() if hasattr(event, 'get_message_str') else str(event.message_str)
+                if txt:
+                    await cs.add_message(sid, uid, "user", txt)
+
+            # 记忆注入
             result = await self.memory_core.on_message(event)
             if result is not None:
                 event.message_obj.message_str = result
         except Exception as e:
-            logger.error(f"[Memory] on_llm_request err: {e}")
+            logger.error(f"[Memory] on_llm_request 出错: {e}")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     async def on_message(self, event: AstrMessageEvent):
-        try:
-            with open("/tmp/md.log", "a") as f:
-                f.write("on_message|called\n")
-        except:
-            pass
         if not self.memory_core:
             return
         try:
             uid = self.memory_core.context_provider.get_user_id(event)
             txt = self.memory_core.context_provider.get_conversation_text(event)
-            with open("/tmp/md.log", "a") as f:
-                f.write(f"on_msg|uid={uid}|txt={txt[:40]}\n")
             if uid and txt:
-                logger.info(f"[Memory] on_msg: {uid}")
-                r = await self.memory_core.consolidation_manager.on_message(uid, txt)
-                with open("/tmp/md.log", "a") as f:
-                    f.write(f"consolidation|result={r}\n")
+                logger.debug(f"[Memory] on_message: {uid}")
+                await self.memory_core.consolidation_manager.on_message(uid, txt)
         except Exception as e:
-            import traceback
-            with open("/tmp/md.log", "a") as f:
-                f.write(f"on_msg|EX={e}|{traceback.format_exc()[:200]}\n")
-            logger.error(f"[Memory] on_msg err: {e}")
+            logger.error(f"[Memory] on_message 出错: {e}")
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, response: LLMResponse = None):
-        try:
-            with open("/tmp/md.log", "a") as f:
-                f.write("on_llm_response|called\n")
-        except:
-            pass
         if not self.memory_core:
             return
         try:
+            # 存储 Bot 回复
+            cs = self.memory_core.conversation_store
+            if cs and response:
+                sid = await cs.get_session_id(event)
+                uid = await cs.get_user_id(event)
+                resp_text = ""
+                if hasattr(response, "result_chain") and response.result_chain:
+                    resp_text = response.result_chain.get_plain_text() or ""
+                if resp_text:
+                    await cs.add_message(sid, uid, "assistant", resp_text)
+
+            # 后台触发记忆整理
             user_id = self.memory_core.context_provider.get_user_id(event)
             text = self.memory_core.context_provider.get_conversation_text(event)
             if user_id and text:
-                logger.info(f"[Memory] on_resp: {user_id}")
+                logger.debug(f"[Memory] on_response 触发整理: {user_id}")
                 asyncio.ensure_future(
                     self.memory_core.consolidation_manager.on_message(user_id, text)
                 )
         except Exception as e:
-            logger.error(f"[Memory] on_resp err: {e}")
+            logger.error(f"[Memory] on_response 出错: {e}")
 
     async def on_unload(self):
         if self.memory_core:
             await self.memory_core.destroy()
-            logger.info("[Memory] unloaded")
+            logger.info("[Memory] 已卸载")

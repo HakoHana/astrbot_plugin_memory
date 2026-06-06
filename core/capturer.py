@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from astrbot.api import logger
+
 from ..models.memory_atom import (
     MemoryAtom,
     AtomType,
@@ -33,7 +35,8 @@ class Capturer:
         atom_store: AtomStore,
         prompts_dir: str,
         config: dict[str, Any] | None = None,
-        on_atoms_created: callable = None,  # 回调：原子创建后通知图谱引擎
+        on_atoms_created: callable = None,
+        write_op_log=None,
     ):
         self.llm = llm_provider
         self.diary_store = diary_store
@@ -41,8 +44,9 @@ class Capturer:
         self.config = config or {}
         self.max_diary_tokens = self.config.get("max_diary_tokens", 500)
         self.on_atoms_created = on_atoms_created
+        self.write_op_log = write_op_log
 
-        # 加载 prompt 模板
+        # 加载 prompt 模板（带内存缓存，不重复读文件）
         self._prompts: dict[str, str] = {}
         prompts_path = Path(prompts_dir)
         for name in ("judge", "diary", "atoms"):
@@ -55,7 +59,6 @@ class Capturer:
     async def should_capture(self, conversation_summary: str) -> CaptureJudgeResult:
         """判断这段对话值不值得记"""
         if not self._prompts.get("judge"):
-            # 没有 prompt 模板则默认记
             return CaptureJudgeResult(
                 should_remember=True,
                 importance=0.5,
@@ -67,9 +70,7 @@ class Capturer:
             result_str = await self.llm.chat(system, conversation_summary)
             return self._parse_judge_result(result_str, conversation_summary)
         except Exception as e:
-            import traceback
-            with open("/tmp/md.log", "a") as f:
-                f.write(f"JUDGE_LLM_ERR|{e}|{traceback.format_exc()[:200]}\n")
+            logger.warning(f"[Memory] Judge LLM 调用失败: {e}")
             return CaptureJudgeResult(should_remember=False)
 
     async def capture(
@@ -77,34 +78,44 @@ class Capturer:
     ) -> CaptureResult:
         """
         完整抓取流水线：
-        1. 写日记（追加到当日 .md）
+        1. 写日记（追加到当日 SQLite）
         2. 提取原子（存入 SQLite）
         """
         today = time.strftime("%Y-%m-%d")
 
+        # 写操作日志（可选）
+        op_id = None
+        if self.write_op_log:
+            op_id = await self.write_op_log.begin("capture", {"user_id": user_id, "date": today})
+
         # 1. 写日记
-        diary_content = await self._write_diary(
-            user_id, judge_result, conversation_summary
-        )
+        diary_content = await self._write_diary(judge_result, conversation_summary)
         if diary_content:
             await self.diary_store.append(user_id, today, diary_content)
+            if op_id:
+                await self.write_op_log.step(op_id, "diary_written")
 
         # 2. 提取原子
         atoms = await self._extract_atoms(diary_content, user_id, today)
         for atom in atoms:
-            atom.prepare_insert()  # 计算 expires_at 和 decay_type
+            atom.prepare_insert()
         if atoms:
             ids = await self.atom_store.insert_many(atoms)
             for atom, aid in zip(atoms, ids):
                 atom.atom_id = aid
+            if op_id:
+                await self.write_op_log.step(op_id, "atoms_stored")
 
-            # 通知图谱引擎
+            # 通知图谱引擎（异步不阻塞）
             if self.on_atoms_created:
-                try:
-                    for atom in atoms:
+                for atom in atoms:
+                    try:
                         await self.on_atoms_created(atom)
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+
+        if op_id:
+            await self.write_op_log.complete(op_id)
 
         return CaptureResult(
             wrote_diary=bool(diary_content),
@@ -115,16 +126,12 @@ class Capturer:
     async def extract_atoms_for_persona(
         self, diary_content: str, user_id: str
     ) -> list[MemoryAtom]:
-        """
-        为画像更新提取原子（独立于日记流程）
-        PersonaEngine 调用此方法
-        """
+        """为画像更新提取原子（独立于日记流程）"""
         today = time.strftime("%Y-%m-%d")
         return await self._extract_atoms(diary_content, user_id, today)
 
     async def _write_diary(
         self,
-        user_id: str,
         judge: CaptureJudgeResult,
         conversation_summary: str,
     ) -> str:
@@ -141,7 +148,8 @@ class Capturer:
 
         try:
             return await self.llm.chat("", user_prompt)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[Memory] 写日记 LLM 失败: {e}")
             return ""
 
     async def _extract_atoms(
@@ -155,15 +163,13 @@ class Capturer:
         try:
             result_str = await self.llm.chat(prompt, diary_content)
             return self._parse_atoms(result_str, user_id, diary_date)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[Memory] 提取原子 LLM 失败: {e}")
             return []
 
-    def _parse_judge_result(
-        self, text: str, default_summary: str
-    ) -> CaptureJudgeResult:
+    def _parse_judge_result(self, text: str, default_summary: str) -> CaptureJudgeResult:
         """解析 LLM 返回的判断 JSON"""
         try:
-            # 尝试提取 JSON
             data = self._extract_json(text)
             return CaptureJudgeResult(
                 should_remember=data.get("should_remember", False),
@@ -175,9 +181,7 @@ class Capturer:
         except Exception:
             return CaptureJudgeResult(should_remember=False)
 
-    def _parse_atoms(
-        self, text: str, user_id: str, diary_date: str
-    ) -> list[MemoryAtom]:
+    def _parse_atoms(self, text: str, user_id: str, diary_date: str) -> list[MemoryAtom]:
         """解析 LLM 返回的原子 JSON"""
         atoms = []
         try:
@@ -203,12 +207,12 @@ class Capturer:
     def _extract_json(self, text: str) -> dict | list:
         """从 LLM 回复中提取 JSON 对象"""
         text = text.strip()
-        # 尝试直接解析
+        # 1. 直接解析
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
-        # 尝试从 ```json ... ``` 中提取
+        # 2. ```json ... ```
         if "```json" in text:
             start = text.index("```json") + 7
             end = text.index("```", start) if "```" in text[start:] else len(text)
@@ -216,20 +220,20 @@ class Capturer:
                 return json.loads(text[start:end].strip())
             except json.JSONDecodeError:
                 pass
-        # 尝试从 { 到 } 提取
+        # 3. { ... } 截取
         brace_start = text.find("{")
         brace_end = text.rfind("}")
         if brace_start >= 0 and brace_end > brace_start:
             try:
-                return json.loads(text[brace_start : brace_end + 1])
+                return json.loads(text[brace_start: brace_end + 1])
             except json.JSONDecodeError:
                 pass
-        # 尝试从 [ 到 ] 提取（列表格式）
+        # 4. [ ... ] 截取
         bracket_start = text.find("[")
         bracket_end = text.rfind("]")
         if bracket_start >= 0 and bracket_end > bracket_start:
             try:
-                return json.loads(text[bracket_start : bracket_end + 1])
+                return json.loads(text[bracket_start: bracket_end + 1])
             except json.JSONDecodeError:
                 pass
         return {}

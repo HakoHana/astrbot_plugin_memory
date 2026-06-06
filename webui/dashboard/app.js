@@ -930,7 +930,7 @@
         html += '<tr data-key="' + key + '" class="' + sel + '" style="height:' + ROW_HEIGHT + 'px">' +
           '<td class="cell-check"><input type="checkbox" class="memory-row-check" data-key="' + key + '"' + (sel ? " checked" : "") + ' aria-label="' + esc(window.t("table.selectMemory", item.memory_id)) + '" /></td>' +
           '<td class="cell-mono cell-id">' + item.memory_id + '</td>' +
-          '<td class="cell-summary"><div class="memory-summary-text">' + esc(item.summary || "") + '</div><div class="memory-summary-meta">' + esc(window.t("table.updated", item.updated_at || "--")) + '</div></td>' +
+          '<td class="cell-summary"><div class="memory-summary-text">' + esc(item.summary || "") + ' [imp=' + imp + ']</div><div class="memory-summary-meta">' + esc(window.t("table.updated", item.updated_at || "--")) + '</div></td>' +
           '<td class="cell-type"><span class="type-tag">' + esc(item.memory_type || "GENERAL") + '</span></td>' +
           '<td class="cell-importance"><div class="importance-bar"><div class="importance-bar-track">' +
           '<div class="importance-bar-fill ' + impCls + '" style="width:' + (impNum * 10) + '%"></div></div>' +

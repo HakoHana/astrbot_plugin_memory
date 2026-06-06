@@ -1,12 +1,12 @@
 /* ═══ 主题切换（try/catch 保护，避免 iframe 下 localStorage 抛 SecurityError 阻断脚本）═══ */
 (function() {
-  var theme = "dark";
-  try { theme = localStorage.getItem("mem-theme") || "dark"; } catch(e) {}
+  var theme = "light";
+  try { theme = localStorage.getItem("mem-theme") || "light"; } catch(e) {}
   try { document.documentElement.setAttribute("data-theme", theme); } catch(e) {}
   document.addEventListener("DOMContentLoaded", function() {
     try {
       var btn = document.getElementById("theme-btn");
-      if (btn) btn.innerHTML = theme === "dark" ? "☀️ 切换亮色模式" : "🌙 切换暗色模式";
+      if (btn) btn.innerHTML = theme === "dark" ? "☀️ 亮色模式" : "🌙 暗色模式";
     } catch(e) {}
   });
 })();
@@ -17,7 +17,7 @@ function toggleTheme() {
     document.documentElement.setAttribute("data-theme", next);
     try { localStorage.setItem("mem-theme", next); } catch(e) {}
     var btn = document.getElementById("theme-btn");
-    if (btn) btn.innerHTML = next === "dark" ? "☀️ 切换亮色模式" : "🌙 切换暗色模式";
+    if (btn) btn.innerHTML = next === "dark" ? "☀️ 亮色模式" : "🌙 暗色模式";
   } catch(e) {}
 }
 

@@ -1,9 +1,10 @@
-从下面的日记中提取关键事实（记忆原子），用于 AI 检索。
+从下面的日记中提取关键事实（记忆原子），用第一人称"我"的视角。
 
 要求：
-- 每条关键事实必须简洁客观，不超过 30 字
-- 像这样：用户告白了 / 用户完成了权限测试 / 用户喜欢草莓
-- 不要用"用户"指代，用实际称呼
+- 每条关键事实不超过 30 字
+- 用第一人称"我"（我是bot，不是用户）
+- 对用户直呼其名（Hako/渋夜旅等），不用"用户"
+- 像这样：Hako告白了 / 帮Hako修复了bug / 夸了我聪明
 
 原子类型说明：
 - episodic:  一次性事件
@@ -26,6 +27,6 @@
 
 输出 JSON：
 {"atoms": [
-    {"type": "episodic", "content": "Hako向Bot告白", "importance": 0.95, "entities": ["Hako"], "diary_snippet": "今天Hako跟我告白啦！！"},
-    {"type": "preference", "content": "Hako喜欢被夸聪明", "importance": 0.7, "entities": ["Hako"], "diary_snippet": "我夸她聪明的时候她可开心了"}
+    {"type": "episodic", "content": "Hako向我告白了", "importance": 0.95, "entities": ["Hako"], "diary_snippet": "今天Hako跟我告白啦！！"},
+    {"type": "preference", "content": "Hako喜欢被我夸聪明", "importance": 0.7, "entities": ["Hako"], "diary_snippet": "我夸她聪明的时候她可开心了"}
 ]}

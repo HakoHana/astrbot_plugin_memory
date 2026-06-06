@@ -214,6 +214,11 @@ class MemoryCore:
             await BaseDbStore.close_all()
         except Exception as e:
             logger.warning(f"[Memory] 关闭连接池异常: {e}")
+            # event loop 可能已不可用，退回到同步关闭
+            try:
+                BaseDbStore.close_all_sync()
+            except Exception:
+                pass
 
         self._initialized = False
 

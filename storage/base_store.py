@@ -97,11 +97,28 @@ class BaseDbStore:
 
     @classmethod
     async def close_all(cls):
-        """关闭所有连接（全局清理用）"""
+        """关闭所有连接（异步版本，用于正常关闭流程）"""
         for dp, bucket in list(cls._pool.items()):
             for lid, ent in list(bucket.items()):
                 try:
                     await ent["conn"].close()
+                except Exception:
+                    pass
+            del cls._pool[dp]
+
+    @classmethod
+    def close_all_sync(cls):
+        """关闭所有连接（同步版本，用于解释器关闭阶段）
+
+        当 event loop 已关闭时使用此方法，
+        直接关闭底层 sqlite3 连接来释放后台线程。
+        """
+        for dp, bucket in list(cls._pool.items()):
+            for lid, ent in list(bucket.items()):
+                try:
+                    conn = ent.get("conn")
+                    if conn and hasattr(conn, "_connection"):
+                        conn._connection.close()
                 except Exception:
                     pass
             del cls._pool[dp]

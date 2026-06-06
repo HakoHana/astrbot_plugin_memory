@@ -3,7 +3,8 @@
         "description": "写日记/提取记忆用的 LLM（留空使用 AstrBot 默认）",
         "type": "string",
         "default": "",
-        "hint": "从已配置的 Provider 中选择"
+        "_special": "select_provider",
+        "hint": "点击选择已配置的 Provider"
     },
     "trigger_msg_count": {
         "description": "每多少轮消息触发一次记忆整理（消息数达到此值触发）",

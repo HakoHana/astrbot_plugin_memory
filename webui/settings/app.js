@@ -33,6 +33,7 @@ async function loadConfig() {
     }
 }
 
+            } catch(e) {
 async function saveConfig() {
     const config = {
         llm_provider: getValue('llm_provider'),

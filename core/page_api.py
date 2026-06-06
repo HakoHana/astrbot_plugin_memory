@@ -38,6 +38,32 @@ class PageApi:
         register(f"{prefix}/persona", self.get_persona, ["GET"], "Get persona")
         register(f"{prefix}/persona/update", self.update_persona, ["POST"], "Update persona")
         register(f"{prefix}/import/livingmemory", self.import_livingmemory, ["POST"], "Import from livingmemory")
+        register(f"{prefix}/providers", self.list_providers, ["GET"], "List LLM providers")
+
+    async def list_providers(self):
+        """列出 AstrBot 中已配置的 LLM Provider"""
+        try:
+            context = self.core.plugin_context
+            provider_manager = getattr(context, "provider_manager", None)
+            if not provider_manager:
+                return self._ok({"providers": [], "current": ""})
+
+            providers = []
+            current_id = ""
+            if hasattr(provider_manager, "curr_provider_inst") and provider_manager.curr_provider_inst:
+                current = provider_manager.curr_provider_inst
+                current_id = getattr(current, "provider_id", "") or getattr(current, "name", "")
+
+            if hasattr(provider_manager, "provider_insts"):
+                for p in provider_manager.provider_insts:
+                    pid = getattr(p, "provider_id", "") or getattr(p, "name", "")
+                    name = getattr(p, "provider_name", "") or pid
+                    if pid:
+                        providers.append({"id": pid, "name": name})
+
+            return self._ok({"providers": providers, "current": current_id})
+        except Exception as e:
+            return self._ok({"providers": [], "current": "", "error": str(e)})
 
     async def get_stats(self):
         """概览统计"""

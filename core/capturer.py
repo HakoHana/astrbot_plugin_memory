@@ -66,8 +66,10 @@ class Capturer:
             system = self._prompts["judge"]
             result_str = await self.llm.chat(system, conversation_summary)
             return self._parse_judge_result(result_str, conversation_summary)
-        except Exception:
-            # LLM 失败时保守处理：不记
+        except Exception as e:
+            import traceback
+            with open("/tmp/md.log", "a") as f:
+                f.write(f"JUDGE_LLM_ERR|{e}|{traceback.format_exc()[:200]}\n")
             return CaptureJudgeResult(should_remember=False)
 
     async def capture(

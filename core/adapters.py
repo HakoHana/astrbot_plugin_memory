@@ -84,6 +84,8 @@ class AstrBotLLMProvider(LLMProvider):
             prompt=user_prompt,
             system_prompt=system_prompt,
         )
+        if hasattr(result, "result_chain") and result.result_chain:
+            return result.result_chain.get_plain_text() or ""
         if hasattr(result, "completion"):
             return result.completion
         if hasattr(result, "text"):
@@ -96,18 +98,32 @@ class AstrBotContextProvider(ContextProvider):
 
     def get_user_id(self, event) -> str:
         """提取用户唯一标识"""
-        # AstrBot 事件有 sender 对象
+        try:
+            if hasattr(event, "get_sender_id"):
+                sid = event.get_sender_id()
+                if sid:
+                    return str(sid)
+        except Exception:
+            pass
+        try:
+            if hasattr(event, "get_session_id"):
+                return str(event.get_session_id())
+        except Exception:
+            pass
         sender = getattr(event, "sender", None)
         if sender:
             user_id = getattr(sender, "user_id", None)
             if user_id:
                 return str(user_id)
-        # 群聊场景
-        group_id = getattr(event, "group_id", None)
+        group_id = getattr(event, "group_id", None) or getattr(event, "group_id", None)
         if group_id:
             return f"group_{group_id}"
-        return "unknown"
+        return "default"
 
     def get_conversation_text(self, event) -> str:
         """提取用户消息文本"""
-        return getattr(event, "message_str", "") or getattr(event, "message", "") or ""
+        if hasattr(event, "get_message_str"):
+            return event.get_message_str() or ""
+        if hasattr(event, "message_str"):
+            return event.message_str or ""
+        return getattr(event, "message", "") or ""

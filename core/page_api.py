@@ -149,14 +149,17 @@ class PageApi:
             from quart import request
             q = request.args
             keyword = q.get("keyword", "").strip()
-            user_id = q.get("user_id", "Hana")
+            user_id = q.get("user_id", "all")
             year = q.get("year", "")
             month = q.get("month", "")
             page = max(1, int(q.get("page", 1)))
             page_size = min(200, max(1, int(q.get("page_size", 50))))
 
-            conditions = ["d.user_id = ?"]
-            params: list = [user_id]
+            conditions = []
+            params: list = []
+            if user_id and user_id != "all":
+                conditions.append("d.user_id = ?")
+                params.append(user_id)
             if year:
                 conditions.append("substr(d.date,1,4) = ?")
                 params.append(year)
@@ -171,17 +174,17 @@ class PageApi:
                     conditions.append("d.content LIKE ?")
                     params.append(f"%{keyword}%")
 
-            where = " AND ".join(conditions)
+            where_sql = (" WHERE " + " AND ".join(conditions)) if conditions else ""
             rows = await self._fetch(f"""
                 SELECT d.id, d.date, d.content, d.created_at, d.updated_at, COALESCE(d.status,'active'),
                        (SELECT COUNT(*) FROM memory_atoms a WHERE a.diary_date=d.date AND a.user_id=d.user_id AND a.status='active'),
                        d.importance
-                FROM diary_entries d WHERE {where}
+                FROM diary_entries d{where_sql}
                 ORDER BY d.id DESC LIMIT ? OFFSET ?
             """, params + [page_size, (page - 1) * page_size])
 
             total_row = await self._fetch(
-                f"SELECT COUNT(*) FROM diary_entries d WHERE {where}", params
+                f"SELECT COUNT(*) FROM diary_entries d{where_sql}", params
             )
             total = total_row[0][0] if total_row else 0
 
@@ -308,7 +311,7 @@ class PageApi:
         try:
             from quart import request
             q = request.args
-            user_id = q.get("user_id", "Hana")
+            user_id = q.get("user_id", "all")
             page = max(1, int(q.get("page", 1)))
             page_size = min(100, max(1, int(q.get("page_size", 20))))
             data = await self.core.atom_store.get_timeline(user_id, page, page_size)

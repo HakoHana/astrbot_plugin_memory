@@ -115,13 +115,14 @@ class CommandHandler:
         from ..core.diary_helper import parse_diary_content, build_diary_content
         import time
 
-        # 查找需要重构的日记：内容 != 摘要（原子）的旧条目
+        # 查找需要重构的日记（所有用户，旧数据可能在不同 user_id 下）
         rows = await self.diary_store.fetch("""
-            SELECT d.id, d.date, d.content
+            SELECT d.id, d.date, d.content, d.user_id
             FROM diary_entries d
-            WHERE d.user_id = ?
+            WHERE (SELECT COUNT(*) FROM memory_atoms a WHERE a.diary_id=d.id) <= 1
+            AND length(d.content) > 20
             ORDER BY d.id
-        """, (user_id,))
+        """)
 
         processed = 0
         skipped = 0
@@ -132,6 +133,7 @@ class CommandHandler:
             did = row[0]
             date_str = row[1]
             content = row[2] or ""
+            row_user_id = row[3] or user_id
 
             # 跳过已经有 atom 且内容不相同的条目
             atoms = await self.atom_store.fetch(
@@ -140,14 +142,9 @@ class CommandHandler:
             )
             if atoms:
                 atom_text = atoms[0][0] if atoms else ""
-                # 如果第一条原子内容和日记内容不同，说明已提取过，跳过
                 if atom_text and len(atom_text) < len(content) * 0.8:
                     skipped += 1
                     continue
-
-            if len(content) < 20:
-                skipped += 1
-                continue
 
             try:
                 # 剥离 frontmatter
@@ -155,7 +152,7 @@ class CommandHandler:
                 source_text = body if body else content
 
                 # 调用 LLM 提取原子
-                new_atoms = await self.capturer.extract_atoms_for_persona(source_text, user_id)
+                new_atoms = await self.capturer.extract_atoms_for_persona(source_text, row_user_id)
                 if not new_atoms:
                     skipped += 1
                     continue
@@ -170,7 +167,7 @@ class CommandHandler:
                 for atom in new_atoms:
                     atom.diary_id = did
                     atom.diary_date = date_str
-                    atom.user_id = user_id
+                    atom.user_id = row_user_id
                     atom.prepare_insert()
 
                 ids = await self.atom_store.insert_many(new_atoms)
@@ -179,7 +176,7 @@ class CommandHandler:
 
                 # 更新日记重要度 = 最高原子重要度
                 max_imp = max(a.importance for a in new_atoms) if new_atoms else 0.5
-                await self.diary_store.update_metadata(user_id, date_str, importance=max_imp)
+                await self.diary_store.update_metadata(row_user_id, date_str, importance=max_imp)
 
                 # 更新日记内容（保留 frontmatter + 简短摘要）
                 atom_lines = []
@@ -187,7 +184,7 @@ class CommandHandler:
                     atom_lines.append(f"- [{a.atom_type.value}] {a.content[:200]}")
                 summary = "\n".join(atom_lines)
                 new_content = build_diary_content(fm, summary)
-                await self.diary_store.upsert(user_id, date_str, new_content)
+                await self.diary_store.upsert(row_user_id, date_str, new_content)
 
                 processed += 1
                 if processed % 10 == 0:

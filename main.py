@@ -63,6 +63,10 @@ class MemoryPlugin(Star):
                     self.memory_core.context_provider.get_user_id(event),
                     raw_text,
                 )
+                if hasattr(req, 'prompt'):
+                    req.prompt = None
+                if req.contexts:
+                    req.contexts.clear()
                 event.message_obj.message_str = ""
                 return
 

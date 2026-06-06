@@ -339,21 +339,13 @@ class PageApi:
             did_val, date_str, content, topics, sentiment, status = row
             status = status or "active"
 
-            # 读该日记关联的原子
+            # 读该日记关联的原子（仅按 diary_id 精确匹配，旧数据无 diary_id 则不显示）
             atoms = []
-            # 先按 diary_id 精确查（新原子带正确关联）
             atom_rows = await self._fetch("""
                 SELECT id, content, atom_type, importance, diary_snippet
                 FROM memory_atoms WHERE diary_id=? AND status='active'
                 ORDER BY importance DESC
             """, (did,))
-            # 如果无结果，按日期回退查（旧原子兼容）
-            if not atom_rows:
-                atom_rows = await self._fetch("""
-                    SELECT id, content, atom_type, importance, diary_snippet
-                    FROM memory_atoms WHERE diary_date=? AND status='active'
-                    ORDER BY importance DESC
-                """, (date_str,))
             for r in atom_rows:
                 atoms.append({
                     "id": r[0], "content": r[1], "type": r[2],
@@ -377,25 +369,53 @@ class PageApi:
             return self._error(str(e))
 
     async def get_diary(self):
-        """获取日记内容"""
+        """获取日记内容（返回解析后的 frontmatter + body）"""
         try:
             from quart import request
             user_id = request.args.get("user_id", "Hana")
             date = request.args.get("date", "")
             content = await self.core.diary_store.read(user_id, date)
-            return self._ok({"date": date, "content": content or ""})
+            if not content:
+                return self._ok({"date": date, "content": "", "frontmatter": {}, "body": ""})
+            from ..core.diary_helper import parse_diary_content
+            fm, body = parse_diary_content(content)
+            return self._ok({
+                "date": date,
+                "content": content,
+                "frontmatter": fm,
+                "body": body,
+            })
         except Exception as e:
             return self._error(str(e))
 
     async def update_diary(self):
-        """更新日记"""
+        """更新日记（保存 content，同步 frontmatter 到 DB 字段）"""
         try:
             from quart import request
-            body = await request.get_json()
-            user_id = body.get("user_id", "Hana")
-            date = body.get("date", "")
-            content = body.get("content", "")
+            from ..core.diary_helper import parse_diary_content
+            body_req = await request.get_json()
+            user_id = body_req.get("user_id", "Hana")
+            date = body_req.get("date", "")
+            content = body_req.get("content", "")
+
             await self.core.diary_store.upsert(user_id, date, content)
+
+            # 同步 frontmatter → DB 字段
+            fm, _ = parse_diary_content(content)
+            updates = {}
+            if "mood" in fm:
+                from ..core.diary_helper import mood_to_sentiment
+                updates["sentiment"] = mood_to_sentiment(str(fm["mood"]))
+            if "importance" in fm:
+                updates["importance"] = float(fm["importance"])
+            if "topics" in fm:
+                topics = fm["topics"]
+                if isinstance(topics, list):
+                    import json
+                    updates["topics"] = json.dumps(topics, ensure_ascii=False)
+            if updates:
+                await self.core.diary_store.update_metadata(user_id, date, **updates)
+
             return self._ok({"saved": True})
         except Exception as e:
             return self._error(str(e))

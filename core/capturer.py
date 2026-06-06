@@ -89,15 +89,25 @@ class Capturer:
             op_id = await self.write_op_log.begin("capture", {"user_id": user_id, "date": today})
 
         # 1. 写日记（获取日记 ID）
-        diary_content = await self._write_diary(judge_result, conversation_summary)
+        diary_body = await self._write_diary(judge_result, conversation_summary)
         diary_id = 0
-        if diary_content:
+        if diary_body:
+            # 用 frontmatter 包装（自描述格式）
+            from .diary_helper import build_diary_content
+            fm = {
+                "date": today,
+                "mood": self._mood_text(judge_result.mood),
+                "importance": judge_result.importance,
+                "topics": [judge_result.reason] if judge_result.reason else [],
+            }
+            diary_content = build_diary_content(fm, diary_body)
             diary_id = await self.diary_store.append(user_id, today, diary_content)
             if op_id:
                 await self.write_op_log.step(op_id, "diary_written")
 
-        # 2. 提取原子
-        atoms = await self._extract_atoms(diary_content, user_id, today)
+        # 2. 提取原子（从 body 提取，不含 frontmatter）
+        atom_source = diary_body if diary_body else (judge_result.context_summary or "")
+        atoms = await self._extract_atoms(atom_source, user_id, today)
         for atom in atoms:
             atom.diary_id = diary_id
             atom.prepare_insert()
@@ -131,6 +141,15 @@ class Capturer:
         """为画像更新提取原子（独立于日记流程）"""
         today = time.strftime("%Y-%m-%d")
         return await self._extract_atoms(diary_content, user_id, today)
+
+    @staticmethod
+    def _mood_text(mood: str) -> str:
+        """将 mood 转为人可读的标签"""
+        mapping = {
+            "happy": "开心", "sad": "低落", "angry": "生气",
+            "excited": "兴奋", "neutral": "平静", "mixed": "复杂",
+        }
+        return mapping.get(mood.strip().lower(), mood.strip() or "平静")
 
     async def _write_diary(
         self,

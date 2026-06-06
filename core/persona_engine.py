@@ -118,6 +118,11 @@ class PersonaEngine:
         for r in rows:
             date_str = r[0]
             content = r[1] or ""
+            # 去除 frontmatter，仅取正文
+            if content.startswith("---"):
+                end = content.find("\n---", 3)
+                if end != -1:
+                    content = content[end + 5:].strip()
             entries.append(f"--- {date_str} ---\n{content[:500]}")
 
         return "\n\n".join(entries)

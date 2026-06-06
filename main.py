@@ -55,12 +55,22 @@ class MemoryPlugin(Star):
         try:
             # 存储用户消息到会话
             cs = self.memory_core.conversation_store
-            if cs:
+            raw_text = event.get_message_str() if hasattr(event, 'get_message_str') else str(event.message_str)
+
+            # 检测指令 → 处理并阻止 LLM 响应
+            if raw_text and raw_text.startswith("/"):
+                await self.memory_core._handle_command(
+                    self.memory_core.context_provider.get_user_id(event),
+                    raw_text,
+                )
+                event.message_obj.message_str = ""
+                return
+
+            if cs and raw_text:
                 sid = await cs.get_session_id(event)
                 uid = await cs.get_user_id(event)
-                txt = event.get_message_str() if hasattr(event, 'get_message_str') else str(event.message_str)
-                if txt:
-                    await cs.add_message(sid, uid, "user", txt)
+                if raw_text:
+                    await cs.add_message(sid, uid, "user", raw_text)
 
             # 记忆注入
             result = await self.memory_core.on_message(event)

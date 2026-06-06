@@ -95,9 +95,11 @@
     dom.queryInput.addEventListener("keydown", function(e) {
       if (e.key === "Enter") { e.preventDefault(); runQuery(); }
     });
-    dom.memoryInput.addEventListener("keydown", function(e) {
-      if (e.key === "Enter") { e.preventDefault(); focusMemory(); }
-    });
+    if (dom.memoryInput) {
+      dom.memoryInput.addEventListener("keydown", function(e) {
+        if (e.key === "Enter") { e.preventDefault(); focusMemory(); }
+      });
+    }
 
     /* Init Graph2D */
     if (window.Graph2D && typeof window.Graph2D.init === "function") {
@@ -189,6 +191,7 @@
   }
 
   async function focusMemory() {
+    if (!dom.memoryInput) { setCanvasMessage("记忆ID输入框不可用", false); return; }
     var text = dom.memoryInput.value.trim();
     if (!text) { setCanvasMessage(window.t("graph.focusEmpty"), false); return; }
     var memoryId = Number.parseInt(text, 10);

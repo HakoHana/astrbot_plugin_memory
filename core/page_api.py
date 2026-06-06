@@ -108,21 +108,38 @@ class PageApi:
             return self._error(str(e))
 
     async def get_graph_overview(self):
-        """图谱概览"""
+        """图谱概览（兼容 LM 前端格式）"""
         try:
-            data = await self.core.graph_store.get_full_graph(500)
-            return self._ok(data)
+            raw = await self.core.graph_store.get_full_graph(500)
+            return self._ok({
+                "enabled": True,
+                "mode": "overview",
+                "snapshot": {
+                    "nodes": raw.get("nodes", []),
+                    "edges": raw.get("edges", []),
+                },
+                "total_nodes": len(raw.get("nodes", [])),
+                "total_edges": len(raw.get("edges", [])),
+                "by_type": {},
+            })
         except Exception as e:
             return self._error(str(e))
 
     async def query_graph(self):
-        """搜索图谱"""
+        """搜索图谱（兼容 LM 前端格式）"""
         try:
             from quart import request
             body = await request.get_json()
             query = (body or {}).get("query", "")
-            data = await self.core.graph_store.query_graph(query, 100)
-            return self._ok(data)
+            raw = await self.core.graph_store.query_graph(query, 100)
+            return self._ok({
+                "enabled": True,
+                "mode": "query",
+                "snapshot": {
+                    "nodes": raw.get("nodes", []),
+                    "edges": raw.get("edges", []),
+                },
+            })
         except Exception as e:
             return self._error(str(e))
 

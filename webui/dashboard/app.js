@@ -236,7 +236,7 @@
       p.classList.toggle("active", p.id === "page-" + name);
     });
     if (name === "graph") { fetchGraphStats(); if (window.ensureGraphScene) window.ensureGraphScene(); }
-    if (name === "memory") { fetchMemories(); }
+    if (name === "memory" || name === "memories") { fetchMemories(); }
     if (name === "system") { fetchSystemOverview(); }
   }
 
@@ -829,11 +829,7 @@
     if (state.memory.keyword) params.set("keyword", state.memory.keyword);
 
     try {
-      var response = await apiRequest("memories?" + params.toString());
-      var data = unwrapApiData(response) || {};
-      // Debug: show in console
-      console.log("fetchMemories response:", JSON.stringify(response).slice(0,500));
-      console.log("fetchMemories total:", data.total, "items:", data.items && data.items.length);
+      var data = unwrapApiData(await apiRequest("memories?" + params.toString())) || {};
       state.memory.total = data.total || 0;
       state.memory.hasMore = data.items && data.items.length >= state.memory.pageSize;
       state.memory.selected.clear();

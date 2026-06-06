@@ -385,7 +385,7 @@ function clearSelection() {
 }
 async function batchDelete() {
   var ids = Array.from(selectedIds);
-  if (!ids.length || !confirm('确定删除 ' + ids.length + ' 篇记忆？')) return;
+  if (!ids.length) return;
   try { await apiPost('/memories/batch-delete', {ids: ids}); selectedIds.clear(); updateBatchBar(); closeSidePanel(); loadMemories(); }
   catch(e) { alert(e.message); }
 }
@@ -492,7 +492,7 @@ async function saveMemoryEdit() {
 async function deleteCurrentMemory() {
   var rowEl = document.querySelector('.mem-row.selected');
   var id = rowEl ? parseInt(rowEl.getAttribute('data-id')) : 0;
-  if (!id || !confirm('确定删除此记忆？')) return;
+  if (!id) return;
   try { await apiPost('/memories/delete', {id: id}); closeSidePanel(); loadMemories(); }
   catch(e) { alert(e.message); }
 }

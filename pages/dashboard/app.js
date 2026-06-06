@@ -87,6 +87,28 @@
     return detail.text || detail.content || detail.summary || "";
   }
 
+  /* ── frontmatter 处理 ── */
+  function stripFrontmatter(text) {
+    if (!text || !text.startsWith("---")) return text || "";
+    var end = text.indexOf("\n---", 3);
+    return end === -1 ? text : text.substring(end + 4).trim();
+  }
+
+  function renderWikilinks(text) {
+    return esc(text).replace(/\[\[([^\]]+?)\]\]/g, '<a class="wikilink" onclick="searchWikilink(\'$1\')" style="color:var(--accent);cursor:pointer;text-decoration:underline">$1</a>');
+  }
+
+  function searchWikilink(name) {
+    var input = document.getElementById("graph-query-input");
+    if (input) input.value = name;
+    var graphBtn = document.querySelector('.nav-item[data-page="graph"]');
+    if (graphBtn) graphBtn.click();
+    setTimeout(function() {
+      var btn = document.getElementById("graph-search-btn");
+      if (btn) btn.click();
+    }, 300);
+  }
+
   /* ================================================================
      Theme
      ================================================================ */
@@ -333,21 +355,34 @@
     try {
       detail = unwrapApiData(await apiRequest("memories/day?did=" + memoryId));
       if (detail) {
-        // Map our API format to LM detail format for rendering
         detail.memory_id = memoryId;
-        detail.text = (detail.diary && detail.diary.content) || "";
-        detail.summary = (detail.diary && detail.diary.content) || "";
+        var rawText = (detail.diary && detail.diary.content) || memory.content || "";
+        // Parse frontmatter
+        var detailMood = "", detailTopics = [];
+        if (rawText.startsWith("---")) {
+          var fmEnd = rawText.indexOf("\n---", 3);
+          if (fmEnd !== -1) {
+            rawText.substring(3, fmEnd).trim().split("\n").forEach(function(line) {
+              var m = line.match(/^([a-zA-Z_]+)\s*:\s*(.+)$/);
+              if (!m) return;
+              if (m[1] === "mood") detailMood = m[2].replace(/^["']|["']$/g, "");
+              if (m[1] === "topics") { try { detailTopics = JSON.parse(m[2].replace(/'/g,'"')); } catch(e) {} }
+            });
+          }
+        }
+        detail.mood = detailMood;
+        detail.topics = Array.isArray(detailTopics) ? detailTopics : [];
+        detail.text = stripFrontmatter(rawText);
+        detail.summary = stripFrontmatter(rawText);
         detail.memory_type = "DIARY";
         detail.status = detail.status || "active";
         detail.created_at = memory.created_at || "--";
         detail.updated_at = memory.updated_at || "--";
         detail.key_facts = Array.isArray(detail.atoms) ? detail.atoms : [];
-        detail.topics = [];
         detail.session_id = "--";
         detail.persona_id = "--";
         detail.update_history = [];
         detail.graph_context = null;
-        // Add diary as a special field
         detail._diary = detail.diary;
         state._detailCache = detail;
       }
@@ -407,6 +442,7 @@
     /* Status + Type pill row */
     html += '<div class="memory-detail-header">';
     html += statusPill(status);
+    if (detail.mood) html += '<span class="type-tag">' + esc(detail.mood) + '</span>';
     html += '<span class="type-tag">' + esc(type) + '</span>';
     html += '<span class="memory-detail-importance">' + window.t("detail.importance") + ': ' + importance + '/10</span>';
     html += '</div>';
@@ -417,9 +453,9 @@
     html += '<button class="btn btn-sm btn-danger" id="peek-delete-btn">' + window.t("detail.deleteBtn") + '</button>';
     html += '</div>';
 
-    /* Content section */
+    /* Content section (render [[links]] as clickable tags) */
     html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.content") + '</div>';
-    html += '<div class="memory-detail-content" id="detail-content-display">' + esc(content) + '</div></div>';
+    html += '<div class="memory-detail-content" id="detail-content-display" style="white-space:pre-wrap;line-height:1.6">' + renderWikilinks(content) + '</div></div>';
 
     /* Graph Context mini view */
     if (graphCtx && graphCtx.nodes && graphCtx.nodes.length) {

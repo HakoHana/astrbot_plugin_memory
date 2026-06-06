@@ -8,7 +8,8 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.core.agent.tool import FunctionTool
 
-from .memory_core import MemoryCore
+# memory_core 不在 __init__ 中传入（Pydantic v2 限制），
+# 在主流程中通过 set_memory_core() 注入
 
 
 def _json_result(data: dict) -> str:
@@ -17,10 +18,6 @@ def _json_result(data: dict) -> str:
 
 class RecallMemoryTool(FunctionTool):
     """主动搜索记忆工具"""
-
-    def __init__(self, memory_core: MemoryCore):
-        super().__init__()
-        self.memory_core = memory_core
 
     name = "recall_long_term_memory"
     description = (
@@ -43,8 +40,18 @@ class RecallMemoryTool(FunctionTool):
         },
         "required": ["query"],
     }
+    # 非 Pydantic 字段，由 setter 注入
+    _memory_core: Any = None
+
+    def set_memory_core(self, mc):
+        """注入 MemoryCore 实例（绕过 Pydantic 字段校验）"""
+        object.__setattr__(self, '_memory_core', mc)
 
     async def call(self, **kwargs) -> str:
+        mc = self._memory_core
+        if not mc:
+            return _json_result({"count": 0, "results": [], "error": "memory_core not set"})
+
         query = kwargs.get("query", "").strip()
         k = int(kwargs.get("k", 3))
         if not query:
@@ -52,7 +59,7 @@ class RecallMemoryTool(FunctionTool):
 
         try:
             user_id = "Hana"
-            atoms = await self.memory_core.retriever.recall(user_id, query, k)
+            atoms = await mc.retriever.recall(user_id, query, k)
             results = [
                 {"content": a.content, "type": a.atom_type.value, "importance": a.importance, "date": a.diary_date}
                 for a in atoms
@@ -65,10 +72,6 @@ class RecallMemoryTool(FunctionTool):
 
 class MemorizeMemoryTool(FunctionTool):
     """主动写入记忆工具"""
-
-    def __init__(self, memory_core: MemoryCore):
-        super().__init__()
-        self.memory_core = memory_core
 
     name = "memorize_long_term_memory"
     description = (
@@ -91,8 +94,17 @@ class MemorizeMemoryTool(FunctionTool):
         },
         "required": ["content"],
     }
+    _memory_core: Any = None
+
+    def set_memory_core(self, mc):
+        """注入 MemoryCore 实例"""
+        object.__setattr__(self, '_memory_core', mc)
 
     async def call(self, **kwargs) -> str:
+        mc = self._memory_core
+        if not mc:
+            return _json_result({"success": False, "error": "memory_core not set"})
+
         content = kwargs.get("content", "").strip()
         importance = float(kwargs.get("importance", 0.7))
         if not content:
@@ -104,14 +116,12 @@ class MemorizeMemoryTool(FunctionTool):
 
             today = time.strftime("%Y-%m-%d")
 
-            # 先确保有日记条目
-            diary = await self.memory_core.diary_store.read("Hana", today)
+            diary = await mc.diary_store.read("Hana", today)
             if not diary:
-                await self.memory_core.diary_store.append(
+                await mc.diary_store.append(
                     "Hana", today, f"## {time.strftime('%H:%M')}\n\n{content}"
                 )
 
-            # 写入原子
             atom = MemoryAtom(
                 user_id="Hana",
                 diary_date=today,
@@ -120,11 +130,10 @@ class MemorizeMemoryTool(FunctionTool):
                 importance=importance,
             )
             atom.prepare_insert()
-            aid = await self.memory_core.atom_store.insert(atom)
+            aid = await mc.atom_store.insert(atom)
 
-            # 索引到图谱
-            if self.memory_core.graph_engine:
-                await self.memory_core.graph_engine.index_atom(atom)
+            if mc.graph_engine:
+                await mc.graph_engine.index_atom(atom)
 
             return _json_result({"success": True, "id": aid, "content": content})
         except Exception as e:

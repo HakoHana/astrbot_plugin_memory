@@ -38,10 +38,11 @@ class MemoryPlugin(Star):
         )
         await self.memory_core.initialize()
         try:
-            self.context.add_llm_tools(
-                RecallMemoryTool(self.memory_core),
-                MemorizeMemoryTool(self.memory_core),
-            )
+            recall_tool = RecallMemoryTool()
+            recall_tool.set_memory_core(self.memory_core)
+            memorize_tool = MemorizeMemoryTool()
+            memorize_tool.set_memory_core(self.memory_core)
+            self.context.add_llm_tools(recall_tool, memorize_tool)
             logger.info("[Memory] Agent Tools 已注册")
         except Exception as e:
             logger.warning(f"[Memory] 注册 Agent Tools 失败: {e}")

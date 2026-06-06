@@ -184,7 +184,6 @@ class MemoryCore:
         """后台索引一致性检查（不阻塞启动）"""
         try:
             validator = IndexValidator(db_path)
-            await validator.initialize()
             results = await validator.validate_all()
             if not results["summary"]["all_passed"]:
                 for name, r in results.items():

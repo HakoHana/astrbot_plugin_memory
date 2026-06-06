@@ -178,6 +178,7 @@ class MemoryCore:
             atom_store=self.atom_store,
             persona_store=self.persona_store,
             retriever=self.retriever,
+            capturer=self.capturer,
         )
 
         self._apply_provider_config()
@@ -296,6 +297,7 @@ class MemoryCore:
             "/记忆搜索": lambda uid, a: self.command_handler.handle_search(uid, " ".join(a)),
             "/记忆删除": self.command_handler.handle_delete,
             "/记忆统计": lambda uid, a: self.command_handler.handle_stats(uid),
+            "/记忆重构": lambda uid, a: self.command_handler.handle_rebuild(uid, a),
         }
 
         handler = handler_map.get(cmd)

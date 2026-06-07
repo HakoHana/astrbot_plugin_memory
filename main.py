@@ -48,12 +48,30 @@ class MemoryPlugin(Star):
             logger.warning(f"[Memory] 注册 Agent Tools 失败: {e}")
         logger.info("[Memory] 初始化完成")
 
+    def _get_sender_name(self, event) -> str:
+        """从事件提取发送者显示名"""
+        try:
+            if hasattr(event, "get_sender_name"):
+                name = event.get_sender_name()
+                if name: return str(name)
+            if hasattr(event, "sender_name"):
+                name = event.sender_name
+                if name: return str(name)
+            if hasattr(event, "message_obj") and event.message_obj:
+                sender = getattr(event.message_obj, "sender", None)
+                if sender:
+                    for attr in ("card", "nickname", "name", "user_displayname"):
+                        val = getattr(sender, attr, None)
+                        if val: return str(val)
+        except Exception:
+            pass
+        return ""
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         if not self.memory_core:
             return
         try:
-            # 如果是指令已在 on_message 处理过，阻止 LLM
             raw_text = event.get_message_str() if hasattr(event, 'get_message_str') else str(event.message_str)
             if raw_text.startswith("/"):
                 if hasattr(req, 'prompt'):
@@ -65,12 +83,22 @@ class MemoryPlugin(Star):
                     event.message_obj.message_str = ""
                 return
 
+            # 提取发送者信息
+            uid = self.memory_core.context_provider.get_user_id(event)
+            sender_name = self._get_sender_name(event)
+
+            # 注册/更新用户名
+            if self.memory_core.atom_store and uid:
+                try:
+                    await self.memory_core.atom_store.ensure_user(uid, sender_name)
+                except Exception:
+                    pass
+
             # 存储用户消息到会话
             cs = self.memory_core.conversation_store
             if cs and raw_text:
                 sid = await cs.get_session_id(event)
-                uid = await cs.get_user_id(event)
-                await cs.add_message(sid, uid, "user", raw_text)
+                await cs.add_message(sid, uid, "user", raw_text, sender_name)
 
             # 记忆注入
             result = await self.memory_core.on_message(event)
@@ -125,7 +153,8 @@ class MemoryPlugin(Star):
                 if hasattr(response, "result_chain") and response.result_chain:
                     resp_text = response.result_chain.get_plain_text() or ""
                 if resp_text:
-                    await cs.add_message(sid, uid, "assistant", resp_text)
+                    bot_name = getattr(event, "bot_name", "") or "Hana"
+                    await cs.add_message(sid, uid, "assistant", resp_text, bot_name)
 
             # 后台触发记忆整理
             user_id = self.memory_core.context_provider.get_user_id(event)

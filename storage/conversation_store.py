@@ -30,6 +30,8 @@ class ConversationStore(BaseDbStore):
                     session_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    sender_id TEXT DEFAULT '',
+                    sender_name TEXT DEFAULT '',
                     timestamp REAL NOT NULL,
                     metadata TEXT DEFAULT '{}'
                 )
@@ -38,9 +40,16 @@ class ConversationStore(BaseDbStore):
                 CREATE INDEX IF NOT EXISTS idx_messages_session
                 ON messages(session_id, id DESC)
             """)
+            # 兼容旧表：补齐 sender_id, sender_name
+            for col in ["sender_id", "sender_name"]:
+                try:
+                    await db.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT DEFAULT ''")
+                except Exception:
+                    pass
             await db.commit()
 
-    async def add_message(self, session_id: str, user_id: str, role: str, content: str):
+    async def add_message(self, session_id: str, user_id: str, role: str, content: str,
+                           sender_name: str = ""):
         """添加一条消息"""
         now = time.time()
         async with self._connect() as db:
@@ -53,32 +62,35 @@ class ConversationStore(BaseDbStore):
                 (now, session_id),
             )
             await db.execute(
-                "INSERT INTO messages(session_id, role, content, timestamp) VALUES (?,?,?,?)",
-                (session_id, role, content, now),
+                "INSERT INTO messages(session_id, role, content, sender_id, sender_name, timestamp) VALUES (?,?,?,?,?,?)",
+                (session_id, role, content, user_id, sender_name, now),
             )
             await db.commit()
 
     async def get_recent_context(self, session_id: str, limit: int = 20,
-                                  user_name: str = "", bot_name: str = "我") -> str:
+                                  bot_name: str = "我") -> str:
         """获取最近的对话上下文（用于写日记/判断）
 
-        Args:
-            user_name: 用户称呼（Hako/渋夜旅等），空则显示 user_id
-            bot_name: Bot 自称，默认"我"
+        格式：用户消息显示 sender_name，bot 消息显示 bot_name
         """
         async with self._connect() as db:
             rows = await db.execute_fetchall(
-                "SELECT role, content FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?",
+                "SELECT role, content, sender_name, sender_id FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?",
                 (session_id, limit),
             )
         if not rows:
             return ""
         lines = []
         for r in reversed(rows):
-            if r[0] == "user":
-                lines.append(f"{user_name or '用户'}: {r[1]}")
+            role = r[0]
+            content = r[1]
+            name = r[2] or ""  # sender_name
+            sid = r[3] or ""   # sender_id
+            if role == "user":
+                display = name if name else (sid or "用户")
+                lines.append(f"[{display}]: {content}")
             else:
-                lines.append(f"{bot_name}: {r[1]}")
+                lines.append(f"[{bot_name}]: {content}")
         return "\n".join(lines)
 
     async def get_session_id(self, event) -> str:

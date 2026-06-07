@@ -105,6 +105,17 @@ class AtomStore(BaseDbStore):
                 "CREATE INDEX IF NOT EXISTS idx_dfl_fact ON diary_fact_links(fact_id)"
             )
 
+            # 用户注册表（user_id → 可读名字）
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_registry (
+                    user_id TEXT PRIMARY KEY,
+                    user_name TEXT NOT NULL DEFAULT '',
+                    first_seen_at REAL NOT NULL,
+                    last_seen_at REAL NOT NULL,
+                    name_updated_at REAL NOT NULL
+                )
+            """)
+
             for idx in [
                 "CREATE INDEX IF NOT EXISTS idx_atoms_user_status_date ON memory_atoms(user_id, status, diary_date)",
                 "CREATE INDEX IF NOT EXISTS idx_atoms_user_status_imp ON memory_atoms(user_id, status, importance DESC)",
@@ -391,6 +402,51 @@ class AtomStore(BaseDbStore):
              "link_importance": r[5], "snippet": r[6] or ""}
             for r in rows
         ]
+
+    # ═══════════════════════════════════════════════════
+    #  用户注册表
+    # ═══════════════════════════════════════════════════
+
+    async def ensure_user(self, user_id: str, user_name: str = "") -> str:
+        """注册或更新用户名字，返回最终使用的名字"""
+        import time
+        now = time.time()
+        name = user_name.strip() or ""
+        async with self._connect() as db:
+            row = await db.execute_fetchall(
+                "SELECT user_name FROM user_registry WHERE user_id = ?", (user_id,)
+            )
+            if row:
+                old_name = row[0][0] or ""
+                # 名字变了才更新
+                if name and name != old_name:
+                    await db.execute(
+                        "UPDATE user_registry SET user_name=?, last_seen_at=?, name_updated_at=? WHERE user_id=?",
+                        (name, now, now, user_id),
+                    )
+                else:
+                    await db.execute(
+                        "UPDATE user_registry SET last_seen_at=? WHERE user_id=?",
+                        (now, user_id),
+                    )
+                display_name = name or old_name
+            else:
+                await db.execute(
+                    "INSERT INTO user_registry (user_id, user_name, first_seen_at, last_seen_at, name_updated_at) VALUES (?,?,?,?,?)",
+                    (user_id, name, now, now, now),
+                )
+                display_name = name or user_id
+            await db.commit()
+        return display_name
+
+    async def get_user_name(self, user_id: str) -> str:
+        """获取用户的可读名字"""
+        row = await self.fetchone(
+            "SELECT user_name FROM user_registry WHERE user_id = ?", (user_id,)
+        )
+        if row and row[0]:
+            return row[0]
+        return user_id
 
     # ═══════════════════════════════════════════════════
     #  内部工具

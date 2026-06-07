@@ -172,11 +172,18 @@ class MemoryPlugin(Star):
     async def on_unload(self):
         if self.memory_core:
             await self.memory_core.destroy()
-            # 解释器关闭阶段可能会触发 threading._shutdown 错误，
-            # 同步关闭连接池确保后台线程释放
             try:
                 from .storage.base_store import BaseDbStore
                 BaseDbStore.close_all_sync()
             except Exception:
                 pass
             logger.info("[Memory] 已卸载")
+
+    # 解释器退出时的最后兜底（同步关闭所有 aiosqlite 连接）
+    @staticmethod
+    def _atexit_cleanup():
+        try:
+            from .storage.base_store import BaseDbStore
+            BaseDbStore.close_all_sync()
+        except Exception:
+            pass

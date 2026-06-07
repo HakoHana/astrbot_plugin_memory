@@ -19,13 +19,13 @@ def _json_result(data: dict) -> str:
 class RecallMemoryTool(FunctionTool):
     """主动搜索记忆工具"""
 
-    name = "recall_long_term_memory"
-    description = (
+    name: str = "recall_long_term_memory"
+    description: str = (
         "当对话需要参考长期记忆中的信息时，调用此工具搜索相关记忆。"
         "使用简短的关键词，不要复制整个用户消息。"
         "当用户问「你还记得吗」「之前说的」「帮我回忆」等时，优先调用此工具。"
     )
-    parameters = {
+    parameters: dict = {
         "type": "object",
         "properties": {
             "query": {
@@ -73,13 +73,13 @@ class RecallMemoryTool(FunctionTool):
 class MemorizeMemoryTool(FunctionTool):
     """主动写入记忆工具"""
 
-    name = "memorize_long_term_memory"
-    description = (
+    name: str = "memorize_long_term_memory"
+    description: str = (
         "当用户明确要求你记住某些信息时（如「帮我记住」「别忘了」「请记住」），"
         "调用此工具将信息写入长期记忆。"
         "将信息整理为简洁的一句话或几个关键点。"
     )
-    parameters = {
+    parameters: dict = {
         "type": "object",
         "properties": {
             "content": {

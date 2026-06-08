@@ -145,6 +145,11 @@ class DiaryStore(BaseDbStore):
                 """, (user_id, date_str, content.strip(), now, now))
                 entry_id = cursor.lastrowid
             await db.commit()
+            # 重建 FTS（content-sync 不会自动同步）
+            try:
+                await db.execute("INSERT INTO diary_fts(diary_fts) VALUES('rebuild')")
+            except Exception:
+                pass
             return entry_id
 
     async def read(self, user_id: str, date_str: str) -> str | None:

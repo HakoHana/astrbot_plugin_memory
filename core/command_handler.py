@@ -117,7 +117,7 @@ class CommandHandler:
         if not self.capturer:
             return "❌ 重构功能不可用（未注入 capturer）"
 
-        from ..core.diary_helper import parse_diary_content, build_diary_content
+        from ..core.diary_helper import parse_diary_content
         import time
 
         force_all = any(kw in " ".join(args) for kw in ["全部", "force", "all", "full"])
@@ -170,8 +170,8 @@ class CommandHandler:
                         continue
 
             try:
-                # 剥离 frontmatter
-                fm, body = parse_diary_content(content)
+                # 剥离 frontmatter，只取正文
+                _, body = parse_diary_content(content)
                 source_text = body if body else content
 
                 # 调用 LLM 提取原子
@@ -200,14 +200,6 @@ class CommandHandler:
                 # 更新日记重要度 = 最高原子重要度
                 max_imp = max(a.importance for a in new_atoms) if new_atoms else 0.5
                 await self.diary_store.update_metadata(row_user_id, date_str, importance=max_imp)
-
-                # 更新日记内容（保留 frontmatter + 简短摘要）
-                atom_lines = []
-                for a in new_atoms[:8]:
-                    atom_lines.append(f"- [{a.atom_type.value}] {a.content[:200]}")
-                summary = "\n".join(atom_lines)
-                new_content = build_diary_content(fm, summary)
-                await self.diary_store.upsert(row_user_id, date_str, new_content)
 
                 processed += 1
                 if processed % 10 == 0:

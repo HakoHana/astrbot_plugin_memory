@@ -276,14 +276,20 @@ class Capturer:
     async def _extract_atoms(
         self, diary_content: str, user_id: str, diary_date: str
     ) -> list[MemoryAtom]:
-        """LLM 从日记内容中提取原子"""
+        """LLM 从日记内容中提取原子
+
+        限制：最多返回 5 条最重要的原子（按重要度排序取 top 5）
+        """
         prompt = self._prompts.get("atoms", "")
         if not prompt or not diary_content:
             return []
 
         try:
             result_str = await self.llm.chat(prompt, diary_content)
-            return self._parse_atoms(result_str, user_id, diary_date)
+            atoms = self._parse_atoms(result_str, user_id, diary_date)
+            # 按重要度降序取 top 5
+            atoms.sort(key=lambda a: a.importance, reverse=True)
+            return atoms[:5]
         except Exception as e:
             logger.warning(f"[Memory] 提取原子 LLM 失败: {e}")
             return []

@@ -28,7 +28,8 @@ class DiaryStore(BaseDbStore):
                     atom_count INTEGER DEFAULT 0,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
-                    status TEXT DEFAULT 'active'
+                    status TEXT DEFAULT 'active',
+                    archived INTEGER DEFAULT 0
                 )
             """)
             await db.execute("""

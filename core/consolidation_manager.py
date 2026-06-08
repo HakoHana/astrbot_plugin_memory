@@ -66,6 +66,11 @@ class ConsolidationManager:
         self._idle_check_interval: float = 60.0  # 每 60 秒检查一次
         self._last_activity: dict[str, float] = {}
 
+        # 消息频率去抖（不每轮都检查触发条件）
+        self._debounce_interval: float = 10.0  # 最小检查间隔（秒）
+        self._last_trigger_check: dict[str, float] = {}
+        self._pending_counts: dict[str, int] = {}  # 内存计数器
+
         self._destroyed = False
 
     async def initialize(self):
@@ -115,10 +120,21 @@ class ConsolidationManager:
         if self._destroyed:
             return None
 
-        state = self._get_or_create_state(user_id)
-        state.msg_count += 1
-        self._mark_dirty(user_id)
+        # 1. 内存计数（零 SQLite 开销）
+        self._pending_counts[user_id] = self._pending_counts.get(user_id, 0) + 1
         self._last_activity[user_id] = time.time()
+
+        # 2. 去抖：最小间隔内不检查触发条件
+        now = time.time()
+        last_check = self._last_trigger_check.get(user_id, 0.0)
+        if now - last_check < self._debounce_interval:
+            return None
+        self._last_trigger_check[user_id] = now
+
+        # 3. 将内存计数刷入状态
+        state = self._get_or_create_state(user_id)
+        state.msg_count += self._pending_counts.pop(user_id, 0)
+        self._mark_dirty(user_id)
 
         # 给对话文本附加用户身份，让 LLM 能分清谁说了什么
         if conversation_text and not conversation_text.startswith("["):
@@ -285,7 +301,11 @@ class ConsolidationManager:
                         return
                     if now - last_active < timeout_sec:
                         continue
+                    # 空闲检查前刷入待处理计数
                     state = self._states.get(uid)
+                    pending = self._pending_counts.pop(uid, 0)
+                    if pending and state:
+                        state.msg_count += pending
                     if state and state.msg_count > 0:
                         logger.info(f"[Memory] 空闲超时触发: {uid}, 未处理消息: {state.msg_count}")
                         try:

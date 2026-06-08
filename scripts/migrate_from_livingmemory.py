@@ -294,7 +294,32 @@ for doc in docs:
 target.commit()
 print(f"  ✅ 导入 {diary_inserted} 篇日记")
 
-# ── 8. 导入图谱数据 ──
+# ── 8. 链接原子 → 日记（轮询分配） ──
+print("\n🔗 链接原子到日记条目...")
+diaries_for_link = target_c.execute(
+    "SELECT id, date FROM diary_entries ORDER BY date, created_at ASC"
+).fetchall()
+atoms_for_link = target_c.execute(
+    "SELECT id, diary_date FROM memory_atoms WHERE diary_id=0 ORDER BY diary_date, created_at ASC"
+).fetchall()
+
+from collections import defaultdict
+d_by_date = defaultdict(list)
+for d in diaries_for_link:
+    d_by_date[d[1]].append(d[0])
+
+linked = 0
+for a in atoms_for_link:
+    day_ids = d_by_date.get(a[1], [])
+    if not day_ids:
+        continue
+    target_c.execute("UPDATE memory_atoms SET diary_id=? WHERE id=?",
+                     (day_ids[linked % len(day_ids)], a[0]))
+    linked += 1
+target.commit()
+print(f"  ✅ 已链接 {linked} 条原子到日记")
+
+# ── 9. 导入图谱数据 ──
 print("\n🔗 导入知识图谱...")
 
 # 节点
@@ -376,7 +401,7 @@ for edge in gedges:
 target.commit()
 print(f"  ✅ 导入 {gedge_inserted} 条边")
 
-# ── 9. 写入 consolidation_state ──
+# ── 10. 写入 consolidation_state ──
 target_c.execute("""
     INSERT OR REPLACE INTO consolidation_state
     (user_id, msg_count, warmup_threshold, last_consolidated_at,
@@ -385,7 +410,7 @@ target_c.execute("""
 """, (USER_NAME, now, datetime.now().strftime("%Y-%m-%d"), diary_inserted))
 target.commit()
 
-# ── 10. 统计 ──
+# ── 11. 统计 ──
 print("\n" + "=" * 60)
 print("  📊 迁移统计")
 print("=" * 60)

@@ -75,17 +75,18 @@ class GraphEngine:
                 all_entities.append(name)
 
         # 1a. 创建日记节点
-        diary_node_key = f"diary:{diary_id}"
+        # node_key = f"{node_type}:{canonical_value}" = "diary:diary_1"
         diary_nodes = [
             GraphNode(
                 node_type="diary",
-                value=f"日记 #{diary_id}",
+                value=f"#{diary_id}",
                 canonical_value=f"diary_{diary_id}",
                 metadata={"diary_id": diary_id},
             )
         ]
         node_key_map = await self.graph_store.upsert_nodes(diary_nodes)
-        diary_node_id = node_key_map.get(diary_node_key, 0)
+        diary_key = f"diary:diary_{diary_id}"
+        diary_node_id = node_key_map.get(diary_key, 0)
 
         if not all_entities:
             return

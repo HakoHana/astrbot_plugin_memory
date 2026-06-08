@@ -117,6 +117,14 @@ class MemoryCore:
         except Exception as e:
             logger.warning(f"[Memory] 写操作日志修复失败: {e}")
 
+        # 初始化 bot 自己的身份
+        if self.atom_store:
+            try:
+                bot_name = self.config.get("bot_name", "Hana")
+                await self.atom_store.init_bot_identity(bot_name)
+            except Exception as e:
+                logger.warning(f"[Memory] 初始化 bot 身份失败: {e}")
+
         # 索引一致性检查（异步，不阻塞初始化）
         task = asyncio.ensure_future(self._async_index_check(db_path))
         self._background_tasks.add(task)

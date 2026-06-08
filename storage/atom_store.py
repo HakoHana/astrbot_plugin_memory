@@ -116,6 +116,49 @@ class AtomStore(BaseDbStore):
                 )
             """)
 
+            # 规范用户 ID（身份体系 v2）
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS canonical_users (
+                    uid TEXT PRIMARY KEY,
+                    primary_name TEXT,
+                    identity_confidence REAL DEFAULT 0.3,
+                    created_at REAL,
+                    updated_at REAL
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_identities (
+                    platform_id TEXT PRIMARY KEY,
+                    uid TEXT NOTULL,
+                    platform TEXT NOT NULL,
+                    display_name TEXT,
+                    first_seen REAL,
+                    last_seen REAL,
+                    verified INTEGER DEFAULT 0,
+                    source TEXT DEFAULT 'auto'
+                )
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_identity_uid ON user_identities(uid)
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_persona (
+                    uid TEXT PRIMARY KEY,
+                    summary TEXT,
+                    full_markdown TEXT,
+                    known_ids TEXT DEFAULT '[]',
+                    primary_name TEXT,
+                    identity_confidence REAL DEFAULT 0.3,
+                    version INTEGER DEFAULT 1,
+                    last_full_update REAL,
+                    last_incremental_update REAL,
+                    incremental_count INTEGER DEFAULT 0,
+                    diary_count_since_full INTEGER DEFAULT 0,
+                    created_at REAL,
+                    updated_at REAL
+                )
+            """)
+
             for idx in [
                 "CREATE INDEX IF NOT EXISTS idx_atoms_user_status_date ON memory_atoms(user_id, status, diary_date)",
                 "CREATE INDEX IF NOT EXISTS idx_atoms_user_status_imp ON memory_atoms(user_id, status, importance DESC)",
@@ -447,6 +490,100 @@ class AtomStore(BaseDbStore):
         if row and row[0]:
             return row[0]
         return user_id
+
+    # ═══════════════════════════════════════════════════
+    #  身份体系（v2）
+    # ═══════════════════════════════════════════════════
+
+    async def ensure_canonical_user(self, platform_id: str, display_name: str = "",
+                                     platform: str = "qq") -> tuple[str, str]:
+        """确保用户存在 canonical_users + user_identities，返回 (uid, name)"""
+        import time
+        now = time.time()
+        name = display_name.strip() or platform_id
+
+        # 查是否已有此平台 ID
+        row = await self.fetchone(
+            "SELECT uid FROM user_identities WHERE platform_id = ?", (platform_id,)
+        )
+        if row:
+            uid = row[0]
+            # 更新名字和最后活跃
+            await self.execute(
+                "UPDATE user_identities SET display_name=?, last_seen=? WHERE platform_id=?",
+                (name, now, platform_id),
+            )
+            await self.execute(
+                "UPDATE canonical_users SET primary_name=?, updated_at=? WHERE uid=?",
+                (name, now, uid),
+            )
+            return uid, name
+
+        # 创建新 UID
+        import uuid
+        uid = "u_" + uuid.uuid4().hex[:12]
+        await self.execute(
+            "INSERT INTO canonical_users (uid, primary_name, created_at, updated_at) VALUES (?,?,?,?)",
+            (uid, name, now, now),
+        )
+        await self.execute(
+            "INSERT INTO user_identities (platform_id, uid, platform, display_name, first_seen, last_seen, source) VALUES (?,?,?,?,?,?,?)",
+            (platform_id, uid, platform, name, now, now, "auto"),
+        )
+        return uid, name
+
+    async def init_bot_identity(self, bot_name: str = "Hana"):
+        """初始化 bot 自己的身份（启动时调用）"""
+        import time
+        now = time.time()
+        row = await self.fetchone(
+            "SELECT uid FROM canonical_users WHERE uid='bot_hana'"
+        )
+        if not row:
+            await self.execute(
+                "INSERT INTO canonical_users (uid, primary_name, created_at, updated_at) VALUES ('bot_hana',?,?,?)",
+                (bot_name, now, now),
+            )
+            await self.execute(
+                "INSERT INTO user_identities (platform_id, uid, platform, display_name, first_seen,last_seen,verified,source) VALUES (?,?,?,?,?,?,1,'system')",
+                (f"astrbot:bot:{bot_name}", "bot_hana", "astrbot", bot_name, now, now),
+            )
+
+    async def get_persona_summary(self, uid: str) -> str:
+        """获取用户画像摘要（供注入用）"""
+        row = await self.fetchone(
+            "SELECT summary FROM user_persona WHERE uid=?", (uid,)
+        )
+        return row[0] if row else ""
+
+    async def save_persona(self, uid: str, summary: str, full: str = "",
+                            incremental: bool = False):
+        """保存或更新用户画像"""
+        import time
+        now = time.time()
+        existing = await self.fetchone(
+            "SELECT uid FROM user_persona WHERE uid=?", (uid,)
+        )
+        if existing:
+            if incremental:
+                await self.execute("""
+                    UPDATE user_persona SET summary=?, full_markdown=?,
+                        last_incremental_update=?, incremental_count=incremental_count+1,
+                        diary_count_since_full=diary_count_since_full+1, updated_at=?
+                    WHERE uid=?
+                """, (summary, full, now, now, uid))
+            else:
+                await self.execute("""
+                    UPDATE user_persona SET summary=?, full_markdown=?,
+                        version=version+1, last_full_update=?, incremental_count=0,
+                        diary_count_since_full=0, updated_at=?
+                    WHERE uid=?
+                """, (summary, full, now, uid))
+        else:
+            await self.execute("""
+                INSERT INTO user_persona (uid, summary, full_markdown, version, last_full_update, created_at, updated_at)
+                VALUES (?,?,?,1,?,?,?)
+            """, (uid, summary, full, now, now, now))
 
     # ═══════════════════════════════════════════════════
     #  内部工具

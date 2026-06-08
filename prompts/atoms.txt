@@ -26,8 +26,15 @@
 每条原子必须包含：
 - `diary_snippet`：从日记中摘录对应的原句
 
-输出 JSON：
+同一条日记可以产出多类原子。例如日记「Hako说喜欢草莓味冰淇淋，我们约好明天一起去买」：
+- factual:     "Hako喜欢草莓味冰淇淋"
+- planned:     "Hako和Bot约定明天一起去买冰淇淋"
+- preference:  "Hako偏好草莓口味"
+
+输出 JSON（每个原子必须包含 type / content / importance / entities / diary_snippet）：
 {"atoms": [
     {"type": "factual", "content": "Hako的常用昵称是'はこ'", "importance": 0.7, "entities": ["Hako"], "diary_snippet": "用户2398604399（はこ）的常用昵称为'はこ'"},
-    {"type": "factual", "content": "Hako从零手搓开发了AI助手Hana", "importance": 0.9, "entities": ["Hako", "Hana"], "diary_snippet": "用户2398604399（はこ）从零手搓开发了AI助手Hana"}
+    {"type": "factual", "content": "Hako从零手搓开发了AI助手Hana", "importance": 0.9, "entities": ["Hako", "Hana"], "diary_snippet": "用户2398604399（はこ）从零手搓开发了AI助手Hana"},
+    {"type": "preference", "content": "Hako喜欢草莓味冰淇淋", "importance": 0.6, "entities": ["Hako"], "diary_snippet": "Hako说喜欢草莓味冰淇淋"},
+    {"type": "planned", "content": "Hako和Bot约定明天一起去买冰淇淋", "importance": 0.7, "entities": ["Hako"], "diary_snippet": "我们约好明天一起去买"}
 ]}

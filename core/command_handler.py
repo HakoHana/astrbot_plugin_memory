@@ -108,26 +108,49 @@ class CommandHandler:
         return "❌ 找不到这条记忆，或你没有权限删除"
 
     async def handle_rebuild(self, user_id: str, args: list[str]) -> str:
-        """处理 /记忆 重构 — 对旧导入数据重新提取原子"""
+        """处理 /记忆 重构 — 对旧导入数据重新提取原子
+
+        参数：
+          /记忆重构        — 只处理原子数 ≤ 1 的日记
+          /记忆重构 全部   — 强制重提所有日记（清空旧原子）
+        """
         if not self.capturer:
             return "❌ 重构功能不可用（未注入 capturer）"
 
         from ..core.diary_helper import parse_diary_content, build_diary_content
         import time
 
-        # 查找需要重构的日记（所有用户，旧数据可能在不同 user_id 下）
-        rows = await self.diary_store.fetch("""
-            SELECT d.id, d.date, d.content, d.user_id
-            FROM diary_entries d
-            WHERE (SELECT COUNT(*) FROM memory_atoms a WHERE a.diary_id=d.id) <= 1
-            AND length(d.content) > 20
-            ORDER BY d.id
-        """)
+        force_all = any(kw in " ".join(args) for kw in ["全部", "force", "all", "full"])
+
+        if force_all:
+            rows = await self.diary_store.fetch("""
+                SELECT d.id, d.date, d.content, d.user_id
+                FROM diary_entries d
+                WHERE length(d.content) > 20
+                ORDER BY d.id
+            """)
+        else:
+            rows = await self.diary_store.fetch("""
+                SELECT d.id, d.date, d.content, d.user_id
+                FROM diary_entries d
+                WHERE (SELECT COUNT(*) FROM memory_atoms a WHERE a.diary_id=d.id) <= 1
+                AND length(d.content) > 20
+                ORDER BY d.id
+            """)
 
         processed = 0
         skipped = 0
         errors = 0
         messages = []
+
+        if force_all:
+            # 先清空所有旧原子
+            await self.atom_store.execute("UPDATE memory_atoms SET status='forgotten' WHERE status='active'")
+            await self.atom_store.execute("DELETE FROM memory_atoms_fts")
+            messages.append("🧹 已清空所有旧原子")
+            processed_all = len(rows)
+        else:
+            processed_all = len(rows)
 
         for row in rows:
             did = row[0]
@@ -135,16 +158,16 @@ class CommandHandler:
             content = row[2] or ""
             row_user_id = row[3] or user_id
 
-            # 跳过已经有 atom 且内容不相同的条目
-            atoms = await self.atom_store.fetch(
-                "SELECT content FROM memory_atoms WHERE diary_id=? AND status='active' LIMIT 2",
-                (did,),
-            )
-            if atoms:
-                atom_text = atoms[0][0] if atoms else ""
-                if atom_text and len(atom_text) < len(content) * 0.8:
-                    skipped += 1
-                    continue
+            if not force_all:
+                atoms = await self.atom_store.fetch(
+                    "SELECT content FROM memory_atoms WHERE diary_id=? AND status='active' LIMIT 2",
+                    (did,),
+                )
+                if atoms:
+                    atom_text = atoms[0][0] if atoms else ""
+                    if atom_text and len(atom_text) < len(content) * 0.8:
+                        skipped += 1
+                        continue
 
             try:
                 # 剥离 frontmatter

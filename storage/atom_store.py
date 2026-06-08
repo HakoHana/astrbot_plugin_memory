@@ -130,7 +130,7 @@ class AtomStore(BaseDbStore, MemoryStore):
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS user_identities (
                     platform_id TEXT PRIMARY KEY,
-                    uid TEXT NOTULL,
+                    uid TEXT NOT NULL,
                     platform TEXT NOT NULL,
                     display_name TEXT,
                     first_seen REAL,

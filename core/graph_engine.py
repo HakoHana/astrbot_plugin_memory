@@ -316,10 +316,8 @@ class GraphEngine:
 
         每天后台运行一次，替代实时的 update_cooccur 调用。
         返回写入的实体对总数。
+        注意：在单事务内执行 DELETE+INSERT，保证原子性。
         """
-        # 清空旧数据
-        await self.graph_store.execute("DELETE FROM entity_cooccur")
-
         # 按 diary 分组获取所有提及的实体
         rows = await self.graph_store.fetch("""
             SELECT ge.source_memory_id, ge.source_node_id
@@ -347,9 +345,10 @@ class GraphEngine:
                     key = (min(a, b), max(a, b))
                     cooccur_counts[key] = cooccur_counts.get(key, 0) + 1
 
-        # 批量写入
+        # 单事务：DELETE + INSERT（保证原子性）
         now = self.graph_store._now_iso()
         async with self.graph_store._connect() as db:
+            await db.execute("DELETE FROM entity_cooccur")
             for (a, b), count in cooccur_counts.items():
                 await db.execute("""
                     INSERT INTO entity_cooccur (entity_a_id, entity_b_id, count, last_updated)

@@ -183,16 +183,6 @@ class MemoryCore:
         else:
             self.archiver = None
 
-        # 后台 relates_to 升级任务
-        if self.graph_engine:
-            relate_task = asyncio.ensure_future(self._relates_to_loop())
-            self._background_tasks.add(relate_task)
-            relate_task.add_done_callback(self._background_tasks.discard)
-
-            co_task = asyncio.ensure_future(self._cooccur_loop())
-            self._background_tasks.add(co_task)
-            co_task.add_done_callback(self._background_tasks.discard)
-
         # 索引一致性检查（异步，不阻塞初始化）
         task = asyncio.ensure_future(self._async_index_check(db_path))
         self._background_tasks.add(task)
@@ -209,6 +199,18 @@ class MemoryCore:
             atom_store=self.atom_store,
             diary_store=self.diary_store,
         )
+
+        # 后台图谱任务（必须在 graph_engine 创建后注册）
+        try:
+            relate_task = asyncio.ensure_future(self._relates_to_loop())
+            self._background_tasks.add(relate_task)
+            relate_task.add_done_callback(self._background_tasks.discard)
+
+            co_task = asyncio.ensure_future(self._cooccur_loop())
+            self._background_tasks.add(co_task)
+            co_task.add_done_callback(self._background_tasks.discard)
+        except Exception as e:
+            logger.warning(f"[Memory] 图谱后台任务注册失败: {e}")
 
         # 5. 核心业务模块
         self.capturer = Capturer(

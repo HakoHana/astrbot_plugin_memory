@@ -192,7 +192,7 @@ class GraphStore(BaseDbStore):
         """获取实体的 k=1 邻居（实体→日记→其他实体）"""
         cv = entity_name.strip().lower().replace(" ", "_")[:80]
         rows = await self.fetch("""
-            SELECT DISTINCT e2.id, e2.value, e2.node_type, ge.relation_type, ge.weight
+            SELECT DISTINCT e2.id, e2.value, e2.node_type, ge2.relation_type, ge2.weight
             FROM graph_edges ge1
             JOIN graph_nodes n1 ON ge1.source_node_id = n1.id
             JOIN graph_edges ge2 ON ge1.source_memory_id = ge2.source_memory_id AND ge2.id != ge1.id

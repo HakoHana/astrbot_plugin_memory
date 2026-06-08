@@ -48,7 +48,7 @@ class RecallMemoryTool(FunctionTool):
         """注入 MemoryCore 实例"""
         object.__setattr__(self, '_memory_core', mc)
 
-    async def call(self, **kwargs) -> str:
+    async def call(self, context, **kwargs) -> str:
         mc = self._memory_core
         if not mc:
             return _json_result({"count": 0, "results": [], "error": "memory_core not set"})
@@ -94,7 +94,7 @@ class MemorizeMemoryTool(FunctionTool):
         """注入 MemoryCore 实例"""
         object.__setattr__(self, '_memory_core', mc)
 
-    async def call(self, **kwargs) -> str:
+    async def call(self, context, **kwargs) -> str:
         mc = self._memory_core
         if not mc:
             return _json_result({"success": False, "error": "memory_core not set"})

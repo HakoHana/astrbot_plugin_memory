@@ -150,6 +150,7 @@ class AtomStore(BaseDbStore, MemoryStore):
                     known_ids TEXT DEFAULT '[]',
                     primary_name TEXT,
                     identity_confidence REAL DEFAULT 0.3,
+                    tier TEXT DEFAULT 'new',
                     version INTEGER DEFAULT 1,
                     last_full_update REAL,
                     last_incremental_update REAL,
@@ -565,11 +566,15 @@ class AtomStore(BaseDbStore, MemoryStore):
         existing = await self.fetchone(
             "SELECT uid FROM user_persona WHERE uid=?", (uid,)
         )
-        # 兼容旧数据库：补齐 tags 列
-        try:
-            await self.execute("ALTER TABLE user_persona ADD COLUMN tags TEXT DEFAULT '[]'")
-        except Exception:
-            pass
+        # 兼容旧数据库：补齐 tags、tier 列
+        for col_def in [
+            "ALTER TABLE user_persona ADD COLUMN tags TEXT DEFAULT '[]'",
+            "ALTER TABLE user_persona ADD COLUMN tier TEXT DEFAULT 'new'",
+        ]:
+            try:
+                await self.execute(col_def)
+            except Exception:
+                pass
 
         if existing:
             if incremental:

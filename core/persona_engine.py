@@ -129,6 +129,23 @@ class PersonaEngine:
 
             # 应用增量 diff
             await self._apply_delta(uid, old_summary, result.strip())
+
+            # 增量超阈值 → 全量重建压缩
+            try:
+                row = await self.atom_store.fetchone("""
+                    SELECT incremental_count, diary_count_since_full
+                    FROM user_persona WHERE uid=?
+                """, (uid,))
+                if row:
+                    inc_cnt = row[0] or 0
+                    dia_cnt = row[1] or 0
+                    if inc_cnt >= 10 or dia_cnt >= 50:
+                        logger.info(f"[Memory] 增量超阈值 ({inc_cnt}次/{dia_cnt}篇) → 全量重建压缩 {uid}")
+                        self._cache.pop(uid, None)
+                        asyncio.ensure_future(self.full_rebuild(uid))
+            except Exception:
+                pass
+
             return True
         except Exception as e:
             logger.warning(f"[Memory] 画像增量更新失败 {uid}: {e}")

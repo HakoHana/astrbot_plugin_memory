@@ -78,7 +78,7 @@ class Capturer:
     ) -> CaptureResult:
         """
         完整抓取流水线：
-        1. 写日记（追加到当日 SQLite）
+        1. 写日记（获取日记 ID）
         2. 提取原子（存入 SQLite）
         """
         today = time.strftime("%Y-%m-%d")
@@ -229,13 +229,35 @@ class Capturer:
         }
         return mapping.get(mood.strip().lower(), mood.strip() or "平静")
 
+    @staticmethod
+    def _detect_speaker_count(text: str) -> int:
+        """从对话文本中检测说话人数（去重后的非 Bot 说话者数量）
+
+        格式：[昵称 | ID: xxx | 时间] ...
+        """
+        import re
+        speakers = set()
+        for m in re.finditer(r'^\[([^|]+)\s*\|', text, re.MULTILINE):
+            name = m.group(1).strip()
+            if not name.lower().startswith("bot"):
+                speakers.add(name)
+        return len(speakers)
+
     async def _write_diary(
         self,
         judge: CaptureJudgeResult,
         conversation_summary: str,
     ) -> str:
-        """LLM 写日记"""
-        prompt = self._prompts.get("diary", "")
+        """LLM 写日记（根据对话中说话人数选择提示词）
+
+        - 多人（≥2 非 Bot 说话者）→ group_chat 提示词
+        - 单人（0~1）→ private_chat 提示词
+        """
+        speaker_count = self._detect_speaker_count(conversation_summary)
+        prompt_key = "group_chat" if speaker_count >= 2 else "private_chat"
+        prompt = self._prompts.get(prompt_key, "")
+        if not prompt:
+            prompt = self._prompts.get("diary", "")
         if not prompt:
             return ""
 

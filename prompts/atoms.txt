@@ -1,10 +1,11 @@
-从下面的日记中提取关键事实（记忆原子），用第一人称"我"的视角。
+从下面的日记中提取关键事实（记忆原子）。用第三人称客观陈述，像写百科条目一样。
 
 要求：
-- 每条关键事实不超过 30 字
-- 用第一人称"我"（我是bot，不是用户）
-- 对用户直呼其名（Hako/渋夜旅等），不用"用户"
-- 像这样：Hako告白了 / 帮Hako修复了bug / 夸了我聪明
+- 每条原子 = 一句客观事实陈述
+- 用第三人称，直呼其名（Hako/渋夜旅等），不用"用户"、不用"我"
+- 不写感受、不写评价、不写bot视角
+- 像这样：「Hako的常用昵称是'はこ'」「Hako从零手搓开发了AI助手Hana」「Hako喜欢草莓味冰淇淋」
+- 一句话说完，不限字数，但不要冗余
 
 原子类型说明：
 - episodic:  一次性事件
@@ -15,18 +16,18 @@
 
 重要性 0~1：
 - 0.9: 重大事件
-- 0.7: 重要时刻
-- 0.5: 普通信息
-- 0.3: 琐碎细节
+- 0.7: 重要
+- 0.5: 普通
+- 0.3: 琐碎
 
 日记内容：
 {{diary}}
 
-额外要求：
-- 每条原子必须包含 `diary_snippet` ——从日记中摘录对应的原句片段
+每条原子必须包含：
+- `diary_snippet`：从日记中摘录对应的原句
 
 输出 JSON：
 {"atoms": [
-    {"type": "episodic", "content": "Hako向我告白了", "importance": 0.95, "entities": ["Hako"], "diary_snippet": "今天Hako跟我告白啦！！"},
-    {"type": "preference", "content": "Hako喜欢被我夸聪明", "importance": 0.7, "entities": ["Hako"], "diary_snippet": "我夸她聪明的时候她可开心了"}
+    {"type": "factual", "content": "Hako的常用昵称是'はこ'", "importance": 0.7, "entities": ["Hako"], "diary_snippet": "用户2398604399（はこ）的常用昵称为'はこ'"},
+    {"type": "factual", "content": "Hako从零手搓开发了AI助手Hana", "importance": 0.9, "entities": ["Hako", "Hana"], "diary_snippet": "用户2398604399（はこ）从零手搓开发了AI助手Hana"}
 ]}

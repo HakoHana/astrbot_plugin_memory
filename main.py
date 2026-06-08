@@ -71,6 +71,11 @@ class MemoryPlugin(Star):
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         if not self.memory_core:
             return
+        # 设置当前用户上下文（tools 等下游通过 contextvar 读取）
+        from .core.context import current_user_id
+        uid = self.memory_core.context_provider.get_user_id(event)
+        current_user_id.set(uid)
+
         try:
             raw_text = event.get_message_str() if hasattr(event, 'get_message_str') else str(event.message_str)
             if raw_text.startswith("/"):

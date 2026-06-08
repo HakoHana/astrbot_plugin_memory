@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any, TYPE_CHECKING
 
-from astrbot.api import logger
+from ..logger import logger
 
 if TYPE_CHECKING:
     from ..core.memory_core import MemoryCore
@@ -94,8 +94,9 @@ class PageApi:
             diary_store = self.core.diary_store
             graph_store = self.core.graph_store
 
-            atom_stats = await atom_store.get_stats("Hana")
-            diary_dates = await diary_store.list_months("Hana")
+            default_uid = self.core.config.get("default_user_id", "")
+            atom_stats = await atom_store.get_stats(default_uid) if default_uid else {"total": 0, "by_type": {}}
+            diary_dates = await diary_store.list_months(default_uid) if default_uid else []
             graph_overview = await graph_store.get_graph_overview() if graph_store else {}
 
             return self._ok({
@@ -263,7 +264,7 @@ class PageApi:
                 await self._execute("DELETE FROM diary_entries WHERE id=?", (diary_id,))
                 await self._execute(
                     "DELETE FROM memory_atoms WHERE diary_date=? AND user_id=?",
-                    (date_str, "Hana"),
+                    (date_str, self.core.config.get("default_user_id", "")),
                 )
             return self._ok({"deleted": True})
         except Exception as e:
@@ -285,7 +286,7 @@ class PageApi:
                     await self._execute("DELETE FROM diary_entries WHERE id=?", (did,))
                     await self._execute(
                         "DELETE FROM memory_atoms WHERE diary_date=? AND user_id=?",
-                        (date_str, "Hana"),
+                        (date_str, self.core.config.get("default_user_id", "")),
                     )
             return self._ok({"deleted": len(ids)})
         except Exception as e:

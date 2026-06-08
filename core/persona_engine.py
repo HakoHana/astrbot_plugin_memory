@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
+from ..logger import logger
 
 from ..storage.persona_store import PersonaStore
 from ..storage.atom_store import AtomStore

@@ -5,11 +5,21 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from astrbot.api import logger
+from ..logger import logger
+from ..context import current_user_id
 from astrbot.core.agent.tool import FunctionTool
 
 # memory_core 不在 __init__ 中传入（Pydantic v2 限制），
 # 在主流程中通过 set_memory_core() 注入
+
+
+def _get_uid() -> str:
+    """从上下文中获取当前用户 ID，兜底配置"""
+    uid = current_user_id.get()
+    if uid:
+        return uid
+    logger.warning("current_user_id 为空，使用默认")
+    return "default"
 
 
 def _json_result(data: dict) -> str:
@@ -58,7 +68,7 @@ class RecallMemoryTool(FunctionTool):
             return _json_result({"count": 0, "results": [], "error": "query is empty"})
 
         try:
-            user_id = "Hana"
+            user_id = _get_uid()
             atoms = await mc.retriever.recall(user_id, query, k)
             results = [
                 {"content": a.content, "type": a.atom_type.value, "importance": a.importance, "date": a.diary_date}
@@ -114,16 +124,17 @@ class MemorizeMemoryTool(FunctionTool):
             from ..models.memory_atom import MemoryAtom, AtomType
             import time
 
+            uid = _get_uid()
             today = time.strftime("%Y-%m-%d")
 
-            diary = await mc.diary_store.read("Hana", today)
+            diary = await mc.diary_store.read(uid, today)
             if not diary:
                 await mc.diary_store.append(
-                    "Hana", today, f"## {time.strftime('%H:%M')}\n\n{content}"
+                    uid, today, f"## {time.strftime('%H:%M')}\n\n{content}"
                 )
 
             atom = MemoryAtom(
-                user_id="Hana",
+                user_id=uid,
                 diary_date=today,
                 content=content[:200],
                 atom_type=AtomType.FACTUAL,

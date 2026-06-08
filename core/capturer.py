@@ -109,13 +109,25 @@ class Capturer:
         atom_source = diary_body if diary_body else (judge_result.context_summary or "")
         raw_atoms = await self._extract_atoms(atom_source, user_id, today)
 
-        # 2a. 去重强化：检查是否已有相似原子，有则强化不走插入
+        # 2a. 去重强化 + 限 5 条
+        existing_count = 0
+        if diary_id > 0:
+            row = await self.atom_store.fetchone(
+                "SELECT COUNT(*) FROM memory_atoms WHERE diary_id=? AND status='active'",
+                (diary_id,)
+            )
+            existing_count = row[0] if row else 0
+
+        slots_left = max(0, 5 - existing_count)
         unique_atoms: list = []
         for atom in raw_atoms:
             atom.diary_id = diary_id
             atom.prepare_insert()
-            if not await self._reinforce_if_duplicate(atom, user_id):
-                unique_atoms.append(atom)
+            if await self._reinforce_if_duplicate(atom, user_id):
+                continue  # 已强化已有原子，不插入
+            if len(unique_atoms) >= slots_left:
+                continue  # 超过 5 条上限，跳过
+            unique_atoms.append(atom)
 
         atoms = unique_atoms
         if atoms:

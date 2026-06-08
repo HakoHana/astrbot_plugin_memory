@@ -186,7 +186,8 @@ class CommandHandler:
                     (did,),
                 )
 
-                # 插入新原子
+                # 插入新原子（最多 5 条）
+                new_atoms = new_atoms[:5]
                 for atom in new_atoms:
                     atom.diary_id = did
                     atom.diary_date = date_str

@@ -189,6 +189,10 @@ class MemoryCore:
             self._background_tasks.add(relate_task)
             relate_task.add_done_callback(self._background_tasks.discard)
 
+            co_task = asyncio.ensure_future(self._cooccur_loop())
+            self._background_tasks.add(co_task)
+            co_task.add_done_callback(self._background_tasks.discard)
+
         # 索引一致性检查（异步，不阻塞初始化）
         task = asyncio.ensure_future(self._async_index_check(db_path))
         self._background_tasks.add(task)
@@ -335,6 +339,23 @@ class MemoryCore:
                 break
             except Exception as e:
                 logger.warning(f"[Memory] relates_to 升级异常: {e}")
+                await asyncio.sleep(3600)
+
+    async def _cooccur_loop(self):
+        """定期批量重建 co_occur 统计（每天一次）"""
+        while not self._initialized:
+            await asyncio.sleep(3600)
+        while True:
+            try:
+                await asyncio.sleep(86400)
+                if not self.graph_engine:
+                    continue
+                count = await self.graph_engine.batch_cooccur()
+                logger.info(f"[Memory] co_occur 批量重建: {count} 对")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[Memory] co_occur 重建异常: {e}")
                 await asyncio.sleep(3600)
 
     # ═══════════════════════════════════════════════════

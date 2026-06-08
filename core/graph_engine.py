@@ -220,11 +220,7 @@ class GraphEngine:
                         weight=0.5,
                     )
 
-        # 4. 更新 co_occur 计数
-        if entity_ids:
-            await self.graph_store.update_cooccur(entity_ids)
-
-        # 5. same_user 边：匹配到 user 节点的实体，查同一 UID 的其他平台 ID
+        # 4. same_user 边：匹配到 user 节点的实体，查同一 UID 的其他平台 ID
         for name in all_entities:
             cv = self._canonicalize(name)
             for prefix in ("entity:", "user:"):
@@ -314,6 +310,56 @@ class GraphEngine:
             created += 1
 
         return created
+
+    async def batch_cooccur(self) -> int:
+        """批量重建 co_occur 统计（从 graph_edges mentions 边聚合）
+
+        每天后台运行一次，替代实时的 update_cooccur 调用。
+        返回写入的实体对总数。
+        """
+        # 清空旧数据
+        await self.graph_store.execute("DELETE FROM entity_cooccur")
+
+        # 按 diary 分组获取所有提及的实体
+        rows = await self.graph_store.fetch("""
+            SELECT ge.source_memory_id, ge.source_node_id
+            FROM graph_edges ge
+            WHERE ge.relation_type = 'mentions' AND ge.source_memory_id > 0
+            ORDER BY ge.source_memory_id, ge.source_node_id
+        """)
+
+        # 按 diary 分组
+        from collections import defaultdict
+        diary_entities: dict[int, list[int]] = defaultdict(list)
+        for r in rows:
+            diary_id, node_id = r[0], r[1]
+            if node_id not in diary_entities[diary_id]:
+                diary_entities[diary_id].append(node_id)
+
+        # 统计共现
+        cooccur_counts: dict[tuple[int, int], int] = {}
+        for entities in diary_entities.values():
+            for i in range(len(entities)):
+                for j in range(i + 1, len(entities)):
+                    a, b = entities[i], entities[j]
+                    if a == b:
+                        continue
+                    key = (min(a, b), max(a, b))
+                    cooccur_counts[key] = cooccur_counts.get(key, 0) + 1
+
+        # 批量写入
+        now = self._now_iso()
+        async with self.graph_store._connect() as db:
+            for (a, b), count in cooccur_counts.items():
+                await db.execute("""
+                    INSERT INTO entity_cooccur (entity_a_id, entity_b_id, count, last_updated)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(entity_a_id, entity_b_id)
+                    DO UPDATE SET count = excluded.count, last_updated = excluded.last_updated
+                """, (a, b, count, now))
+            await db.commit()
+
+        return len(cooccur_counts)
 
     async def reindex_all(self, user_id: str | None = None):
         """重建全部图谱"""

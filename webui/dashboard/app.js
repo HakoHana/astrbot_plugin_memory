@@ -1265,7 +1265,7 @@
           '<span class="result-rank">#' + (i + 1) + '</span>' +
           '<span class="result-score-badge ' + badgeCls + '">' + pct.toFixed(1) + '%</span>' +
         '</div>' +
-        '<div class="result-content">' + esc(r.content || "") + '</div>' +
+        '<div class="result-content">' + esc(cleanDisplayText(r.content || "")) + '</div>' +
         '<div class="result-scores">' + scores.map(function(s) {
           var v = s.val != null ? Math.min(1, Math.max(0, parseFloat(s.val) || 0)) : 0;
           var w = (v * 100).toFixed(0);

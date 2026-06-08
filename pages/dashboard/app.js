@@ -1275,7 +1275,7 @@
           '<span class="result-rank">#' + (i + 1) + '</span>' +
           '<span class="result-score-badge ' + badgeCls + '">' + pct.toFixed(1) + '%</span>' +
         '</div>' +
-        '<div class="result-content">' + esc(r.content || "") + '</div>' +
+        '<div class="result-content">' + esc(cleanDisplayText(r.content || "")) + '</div>' +
         '<div class="result-scores">' + scores.map(function(s) {
           var v = s.val != null ? Math.min(1, Math.max(0, parseFloat(s.val) || 0)) : 0;
           var w = (v * 100).toFixed(0);
@@ -1762,7 +1762,7 @@
       html += '<span class="archive-item-user">' + esc(item.user_id || "") + '</span>';
       html += '<span class="archive-item-importance">' + (item.importance != null ? Number(item.importance).toFixed(1) : "") + '</span>';
       html += '</div>';
-      html += '<div class="archive-item-content">' + esc(item.content || "") + '</div>';
+      html += '<div class="archive-item-content">' + esc(cleanDisplayText(item.content || "")) + '</div>';
       html += '<div class="archive-item-actions">';
       html += '<button class="btn btn-sm btn-ghost archive-restore-btn" data-id="' + item.id + '">' + window.t("common.refresh") + '</button>';
       html += '</div></div>';

@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .logger import logger
+from ..core.logger import logger
 
 from .base_store import BaseDbStore
 

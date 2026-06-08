@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from ..models.memory_atom import MemoryAtom, AtomType, AtomStatus, DecayType
+from ..core.adapters import MemoryStore
 from .base_store import BaseDbStore
 
 
@@ -25,7 +26,7 @@ INSERT INTO memory_atoms_fts (atom_id, content, user_id) VALUES (?, ?, ?)\
 """
 
 
-class AtomStore(BaseDbStore):
+class AtomStore(BaseDbStore, MemoryStore):
     """原子存储：SQLite + FTS5 全文搜索"""
     _pragmas = [
         "PRAGMA journal_mode = WAL",

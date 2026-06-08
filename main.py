@@ -153,7 +153,7 @@ class MemoryPlugin(Star):
             cs = self.memory_core.conversation_store
             if cs and response:
                 sid = await cs.get_session_id(event)
-                uid = await cs.get_user_id(event)
+                uid = self.memory_core.context_provider.get_user_id(event)
                 resp_text = ""
                 if hasattr(response, "result_chain") and response.result_chain:
                     resp_text = response.result_chain.get_plain_text() or ""

@@ -103,10 +103,3 @@ class ConversationStore(BaseDbStore):
             return event.get_session_id() or "default"
         return "default"
 
-    async def get_user_id(self, event) -> str:
-        """从事件中提取用户 ID（建议改用 AstrBotContextProvider.get_user_id）"""
-        if hasattr(event, "get_sender_id"):
-            sid = event.get_sender_id()
-            if sid:
-                return str(sid)
-        return "default"

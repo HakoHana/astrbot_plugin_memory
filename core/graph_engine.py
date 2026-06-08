@@ -348,7 +348,7 @@ class GraphEngine:
                     cooccur_counts[key] = cooccur_counts.get(key, 0) + 1
 
         # 批量写入
-        now = self._now_iso()
+        now = self.graph_store._now_iso()
         async with self.graph_store._connect() as db:
             for (a, b), count in cooccur_counts.items():
                 await db.execute("""

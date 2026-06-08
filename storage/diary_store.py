@@ -41,6 +41,11 @@ class DiaryStore(BaseDbStore):
                     CREATE VIRTUAL TABLE IF NOT EXISTS diary_fts
                     USING fts5(content, content=diary_entries, tokenize='unicode61')
                 """)
+                # 重建 FTS 索引（确保已有数据也被索引）
+                try:
+                    await db.execute("INSERT INTO diary_fts(diary_fts) VALUES('rebuild')")
+                except Exception:
+                    pass
             except Exception:
                 pass
 

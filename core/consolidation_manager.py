@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Any, Callable
 
-from ..logger import logger
+from .logger import logger
 
 from ..models.memory_atom import PersistedSessionState, CaptureResult
 from ..storage.state_store import StateStore

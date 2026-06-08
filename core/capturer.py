@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..logger import logger
+from .logger import logger
 
 from ..models.memory_atom import (
     MemoryAtom,

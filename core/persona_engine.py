@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..logger import logger
+from .logger import logger
 from ..storage.atom_store import AtomStore
 from ..storage.diary_store import DiaryStore
 from .adapters import LLMProvider

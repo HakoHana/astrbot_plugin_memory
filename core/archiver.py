@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..logger import logger
+from .logger import logger
 from ..storage.diary_store import DiaryStore
 from ..core.diary_helper import parse_diary_content, build_diary_content
 

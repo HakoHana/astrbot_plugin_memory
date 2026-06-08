@@ -180,7 +180,7 @@ class GraphStore(BaseDbStore):
     async def get_cooccurring(self, entity_id: int, k: int = 10) -> list[dict]:
         """获取与某实体最常共现的实体"""
         rows = await self.fetch("""
-            SELECT e.id, e.value, e.node_type, c.count
+            SELECT e.id, e.value, e.node_type, ec.count
             FROM entity_cooccur ec
             JOIN graph_nodes e ON e.id = CASE WHEN ec.entity_a_id = ? THEN ec.entity_b_id ELSE ec.entity_a_id END
             WHERE (ec.entity_a_id = ? OR ec.entity_b_id = ?)
@@ -197,8 +197,8 @@ class GraphStore(BaseDbStore):
             JOIN graph_nodes n1 ON ge1.source_node_id = n1.id
             JOIN graph_edges ge2 ON ge1.source_memory_id = ge2.source_memory_id AND ge2.id != ge1.id
             JOIN graph_nodes e2 ON ge2.source_node_id = e2.id
-            WHERE n1.canonical_value = ? AND n1.node_type = 'entity'
-            AND e2.node_type = 'entity'
+            WHERE n1.canonical_value = ? AND n1.node_type IN ('entity', 'user')
+            AND e2.node_type IN ('entity', 'user')
             LIMIT ?
         """, (cv, k))
         return [{"id": r[0], "label": r[1], "type": r[2], "relation": r[3], "weight": r[4]} for r in rows]

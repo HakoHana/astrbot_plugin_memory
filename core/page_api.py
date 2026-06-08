@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any, TYPE_CHECKING
 
-from ..logger import logger
+from .logger import logger
 
 if TYPE_CHECKING:
     from ..core.memory_core import MemoryCore

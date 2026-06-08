@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Any
 
-from ..logger import logger
+from .logger import logger
 
 from ..storage.diary_store import DiaryStore
 from ..storage.atom_store import AtomStore

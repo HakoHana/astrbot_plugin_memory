@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..logger import logger
+from .logger import logger
 from ..context import current_user_id
 from astrbot.core.agent.tool import FunctionTool
 

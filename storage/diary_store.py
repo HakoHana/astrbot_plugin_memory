@@ -35,8 +35,82 @@ class DiaryStore(BaseDbStore):
                 CREATE INDEX IF NOT EXISTS idx_diary_user_date
                 ON diary_entries(user_id, date)
             """)
+            # FTS5 索引（自动同步 diary_entries.content）
+            try:
+                await db.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS diary_fts
+                    USING fts5(content, content=diary_entries, tokenize='unicode61')
+                """)
+            except Exception:
+                pass
+
             # 列补齐已在 db_migration.py 中集中管理
             await db.commit()
+
+    async def search_fts(self, query: str, user_id: str, k: int = 5,
+                          imp_weight: float = 0.6, rank_weight: float = 0.4) -> list[dict]:
+        """在 diary_entries 上全文搜索
+
+        Args:
+            query: 搜索关键词
+            user_id: 用户 ID（空字符串则查所有）
+            k: 返回条数
+            imp_weight: 重要度权重
+            rank_weight: 匹配度权重
+        """
+        safe_query = self._sanitize_fts_query(query)
+        if not safe_query:
+            return []
+
+        candidates = k * 3
+        if user_id:
+            rows = await self.fetch("""
+                SELECT d.id, d.date, d.content, d.importance, rank
+                FROM diary_fts
+                JOIN diary_entries d ON diary_fts.rowid = d.id
+                WHERE diary_fts MATCH ? AND d.user_id = ?
+                ORDER BY rank
+                LIMIT ?
+            """, (safe_query, user_id, candidates))
+        else:
+            rows = await self.fetch("""
+                SELECT d.id, d.date, d.content, d.importance, rank
+                FROM diary_fts
+                JOIN diary_entries d ON diary_fts.rowid = d.id
+                WHERE diary_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """, (safe_query, candidates))
+
+        if not rows:
+            return []
+
+        max_rank = abs(rows[-1][-1]) if rows else 1
+        if max_rank < 0.001:
+            max_rank = 1
+
+        scored = []
+        for r in rows:
+            rank_val = abs(r[-1])
+            rank_norm = 1.0 - min(1.0, rank_val / max_rank)
+            score = (r[3] or 0.5) * imp_weight + rank_norm * rank_weight
+            scored.append((score, {
+                "id": r[0], "date": r[1], "content": r[2][:200],
+                "importance": r[3], "score": round(score, 3),
+            }))
+
+        scored.sort(key=lambda x: -x[0])
+        return [s[1] for s in scored[:k]]
+
+    def _sanitize_fts_query(self, query: str) -> str:
+        if not query or not query.strip():
+            return ""
+        import re
+        cleaned = re.sub(r'[^\w一-鿿]', ' ', query).strip()
+        if not cleaned:
+            return ""
+        terms = cleaned.split()
+        return ' AND '.join(f'"{t}"*' for t in terms if t)
 
     async def append(self, user_id: str, date_str: str, content: str) -> int:
         """追加内容到当日日记（追加到已有条目末尾，或创建新条目）

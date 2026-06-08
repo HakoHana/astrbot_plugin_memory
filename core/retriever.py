@@ -1,4 +1,4 @@
-"""检索引擎 — 召回相关记忆"""
+"""检索引擎 — 召回相关记忆（混合：原子 + 日记全文）"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from typing import Any
 
 from ..models.memory_atom import MemoryAtom, RecallResult
 from ..storage.atom_store import AtomStore
+from ..storage.diary_store import DiaryStore
 from ..storage.persona_store import PersonaStore
 
 
@@ -13,17 +14,21 @@ class Retriever:
     """
     记忆检索引擎
 
-    MVP 使用 FTS5 全文搜索，预留向量搜索接口。
+    双通道检索：
+    - 原子事实（atomic_facts 结构化匹配）
+    - 日记全文（diary_fts FTS5）
     """
 
     def __init__(
         self,
         atom_store: AtomStore,
         persona_store: PersonaStore,
+        diary_store: DiaryStore | None = None,
         config: dict[str, Any] | None = None,
     ):
         self.atom_store = atom_store
         self.persona_store = persona_store
+        self.diary_store = diary_store
         self.config = config or {}
         self.recall_count = self.config.get("recall_count", 5)
         self.recall_max_tokens = self.config.get("recall_max_tokens", 500)
@@ -92,6 +97,19 @@ class Retriever:
             atoms=atoms,
             persona_text=persona,
         )
+
+    async def search_diaries(self, user_id: str, query: str, k: int = 5) -> list[dict]:
+        """搜索日记全文（diary_fts）"""
+        if not self.diary_store:
+            return []
+        imp_w, rank_w = self._search_weights()
+        return await self.diary_store.search_fts(query, user_id, k, imp_w, rank_w)
+
+    async def hybrid_search(self, user_id: str, query: str, k: int = 5) -> dict:
+        """混合搜索：原子 + 日记，合并返回"""
+        atoms = await self.recall(user_id, query, k)
+        diaries = await self.search_diaries(user_id, query, k)
+        return {"atoms": atoms, "diaries": diaries}
 
     async def recall_by_keywords(
         self, user_id: str, keywords: list[str], k: int = 5

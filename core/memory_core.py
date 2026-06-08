@@ -196,6 +196,7 @@ class MemoryCore:
         self.retriever = Retriever(
             atom_store=self.atom_store,
             persona_store=self.persona_store,
+            diary_store=self.diary_store,
             config=self.config,
         )
         self.injector = MemoryInjector(self.config)

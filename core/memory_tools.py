@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from .logger import logger
-from ..context import current_user_id
+from .context import current_user_id
 from astrbot.core.agent.tool import FunctionTool
 
 # memory_core 不在 __init__ 中传入（Pydantic v2 限制），

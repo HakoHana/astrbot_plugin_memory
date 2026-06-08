@@ -149,12 +149,14 @@ class MemoryPlugin(Star):
                 if hasattr(event, 'message_obj') and event.message_obj:
                     event.message_obj.message_str = ""
 
-                if txt.strip() == "/记忆重构":
+                if txt.strip().startswith("/记忆重构"):
                     from astrbot.core.message.message_event_result import MessageChain
+                    parts = txt.strip().split(maxsplit=1)
+                    args = parts[1:] if len(parts) > 1 else []
                     chain = MessageChain().message("🔄 正在逐条重构旧记忆，请稍候...")
                     await event.send(chain)
 
-                    result = await self.memory_core.command_handler.handle_rebuild(uid, [])
+                    result = await self.memory_core.command_handler.handle_rebuild(uid, args)
                     chain2 = MessageChain().message(result)
                     await event.send(chain2)
                 else:

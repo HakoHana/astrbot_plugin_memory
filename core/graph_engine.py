@@ -88,10 +88,53 @@ class GraphEngine:
         diary_key = f"diary:diary_{diary_id}"
         diary_node_id = node_key_map.get(diary_key, 0)
 
+        # 1b. 解析 frontmatter → topic/emotion/date 节点
+        from ..core.diary_helper import parse_diary_content
+        fm, _ = parse_diary_content(content)
+        meta_nodes: list[GraphNode] = []
+        date_str = fm.get("date", "")
+        if date_str:
+            meta_nodes.append(GraphNode(
+                node_type="date", value=date_str,
+                canonical_value=date_str.replace("-", ""),
+                metadata={"count": 1},
+            ))
+        mood = fm.get("mood", "")
+        if mood:
+            meta_nodes.append(GraphNode(
+                node_type="emotion", value=mood,
+                canonical_value=mood.lower().strip(),
+                metadata={"count": 1},
+            ))
+        for topic in (fm.get("topics") or []):
+            t = str(topic).strip()
+            if t:
+                meta_nodes.append(GraphNode(
+                    node_type="topic", value=t,
+                    canonical_value=self._canonicalize(t),
+                    metadata={"count": 1},
+                ))
+        if meta_nodes:
+            node_key_map.update(await self.graph_store.upsert_nodes(meta_nodes))
+
         if not all_entities:
+            # 尽管无实体，仍需将日记关联到日期等元节点
+            for mn in meta_nodes:
+                mn_key = mn.node_key
+                mn_id = node_key_map.get(mn_key)
+                if mn_id and diary_node_id:
+                    await self.graph_store.add_edge_by_ids(
+                        edge_key=f"diary:{diary_id}:meta:{mn.node_type}",
+                        source_node_id=diary_node_id,
+                        target_node_id=mn_id,
+                        relation_type="on_date" if mn.node_type == "date" else "has_meta",
+                        source_memory_id=diary_id,
+                        weight=0.5,
+                    )
             return
 
         # 2. 创建实体节点（检测 user 类型）
+        # 并将 meta 节点也加入 node_key_map 供后续关联使用
         from ..storage.atom_store import AtomStore
         nodes = []
         for name in all_entities:
@@ -135,6 +178,47 @@ class GraphEngine:
                     )
                     entity_ids.append(src_id)
                     break
+
+        # 3a. 关联日记 → topic/emotion/date 元节点
+        for mn_key in [f"{t}:{cv}" for t, cv in [
+            ("date", date_str.replace("-", "") if date_str else ""),
+        ] if cv]:
+            mn_id = node_key_map.get(mn_key)
+            if mn_id and diary_node_id:
+                await self.graph_store.add_edge_by_ids(
+                    edge_key=f"diary:{diary_id}:on_date:{mn_key.split(':')[-1]}",
+                    source_node_id=diary_node_id,
+                    target_node_id=mn_id,
+                    relation_type="on_date",
+                    source_memory_id=diary_id,
+                    weight=0.5,
+                )
+        for mood_val in [mood] if mood else []:
+            mk = f"emotion:{mood_val.lower().strip()}"
+            mn_id = node_key_map.get(mk)
+            if mn_id and diary_node_id:
+                await self.graph_store.add_edge_by_ids(
+                    edge_key=f"diary:{diary_id}:mood:{mood_val.lower().strip()}",
+                    source_node_id=diary_node_id,
+                    target_node_id=mn_id,
+                    relation_type="has_meta",
+                    source_memory_id=diary_id,
+                    weight=0.5,
+                )
+        for topic in (fm.get("topics") or []):
+            t = str(topic).strip()
+            if t:
+                tk = f"topic:{self._canonicalize(t)}"
+                tn_id = node_key_map.get(tk)
+                if tn_id and diary_node_id:
+                    await self.graph_store.add_edge_by_ids(
+                        edge_key=f"diary:{diary_id}:topic:{self._canonicalize(t)}",
+                        source_node_id=diary_node_id,
+                        target_node_id=tn_id,
+                        relation_type="has_meta",
+                        source_memory_id=diary_id,
+                        weight=0.5,
+                    )
 
         # 4. 更新 co_occur 计数
         if entity_ids:

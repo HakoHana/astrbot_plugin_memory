@@ -212,9 +212,8 @@ class MemoryCore:
         )
         self.persona_engine = PersonaEngine(
             llm_provider=self.llm_provider,
-            persona_store=self.persona_store,
-            diary_store=self.diary_store,
             atom_store=self.atom_store,
+            diary_store=self.diary_store,
             capturer=self.capturer,
             prompts_dir=prompts_dir,
             config=self.config,
@@ -313,6 +312,79 @@ class MemoryCore:
             except Exception as e:
                 logger.warning(f"[Memory] 归档异常: {e}")
                 await asyncio.sleep(3600)
+
+    # ═══════════════════════════════════════════════════
+    #  用户分层 + 消息过滤
+    # ═══════════════════════════════════════════════════
+
+    KEYWORD_TRIGGER = {"记住", "别忘了", "喜欢", "教我", "帮我", "拜托",
+                       "SC", "舰长", "关注", "谢谢", "投喂", "礼物", "订阅"}
+
+    TIER_CONFIGS = {
+        "core":  {"days": 7,   "msg_threshold": 10},
+        "active": {"days": 30,  "msg_threshold": 5},
+    }
+
+    async def _get_tier(self, user_id: str) -> str:
+        """获取用户等级，不命中默认 new"""
+        try:
+            row = await self.atom_store.fetchone(
+                "SELECT tier FROM user_persona WHERE uid=?", (user_id,)
+            )
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            pass
+        return "new"
+
+    async def _maybe_update_tier(self, user_id: str):
+        """轻量级等级更新（每 10 条消息才重算）"""
+        try:
+            row = await self.atom_store.fetchone(
+                "SELECT diary_count_since_full FROM user_persona WHERE uid=?",
+                (user_id,),
+            )
+            if row and row[0] is not None and row[0] < 10:
+                return
+            # 统计最近活跃度
+            now = time.time()
+            recent = await self.atom_store.fetchone(
+                "SELECT COUNT(*) FROM diary_entries WHERE user_id=? AND created_at > ?",
+                (user_id, now - 30 * 86400),
+            )
+            msg_count = recent[0] if recent else 0
+            if msg_count >= 10:
+                tier = "core"
+            elif msg_count >= 5:
+                tier = "active"
+            elif msg_count >= 1:
+                tier = "occasional"
+            else:
+                tier = "new"
+            await self.atom_store.execute(
+                "UPDATE user_persona SET tier=?, diary_count_since_full=0 WHERE uid=?",
+                (tier, user_id),
+            )
+        except Exception:
+            pass
+
+    async def should_ignore(self, user_id: str, text: str) -> bool:
+        """预过滤：检查是否应忽略此消息"""
+        tier = await self._get_tier(user_id)
+        if tier in ("core", "active"):
+            return False  # 核心/活跃用户不过滤
+
+        # 预过滤规则
+        if len(text) < 3:
+            return True
+        if len(set(text)) / max(len(text), 1) < 0.4:  # 重复率高
+            return True
+        if all(c in "😂😍😊😭😘🥰😁😅🤣😏🙏💕✨😌😔😤😴🤔👀🔥" for c in text.strip()):
+            return True
+        # 关键词白名单
+        if any(kw in text for kw in self.KEYWORD_TRIGGER):
+            return False
+        return True
 
     async def destroy(self):
         """优雅关闭所有模块"""

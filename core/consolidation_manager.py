@@ -215,7 +215,7 @@ class ConsolidationManager:
         # 检查 L3（画像更新）
         if state.diary_count_since_persona >= self.persona_update_interval:
             try:
-                await self.persona_engine.update_persona(user_id)
+                await self.persona_engine.full_rebuild(user_id)
                 state.diary_count_since_persona = 0
                 logger.info(f"[Memory] 画像已更新: {user_id}")
             except Exception as e:

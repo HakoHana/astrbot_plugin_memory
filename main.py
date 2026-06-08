@@ -109,6 +109,12 @@ class MemoryPlugin(Star):
             result = await self.memory_core.on_message(event)
             if result is not None:
                 event.message_obj.message_str = result
+
+            # 更新用户等级（轻量，每 ~10 条消息才重算）
+            try:
+                await self.memory_core._maybe_update_tier(uid)
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"[Memory] on_llm_request 出错: {e}")
 
@@ -119,6 +125,17 @@ class MemoryPlugin(Star):
         try:
             uid = self.memory_core.context_provider.get_user_id(event)
             txt = self.memory_core.context_provider.get_conversation_text(event)
+
+            # 预过滤：新用户/噪声消息直接丢弃（不经过 LLM）
+            if txt and not txt.startswith("/") and uid:
+                try:
+                    if await self.memory_core.should_ignore(uid, txt):
+                        event.message_str = ""
+                        if hasattr(event, 'message_obj') and event.message_obj:
+                            event.message_obj.message_str = ""
+                        return
+                except Exception:
+                    pass
 
             # 检测指令 → 在 LLM 处理前拦截，直接回复
             if txt and txt.startswith("/"):

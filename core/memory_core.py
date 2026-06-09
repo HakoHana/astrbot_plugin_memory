@@ -531,7 +531,7 @@ class MemoryCore:
 
         self._initialized = False
 
-    async def on_message(self, event) -> str | None:
+    async def on_message(self, event, sender_name: str = "") -> str | None:
         """
         消息处理入口
 
@@ -554,6 +554,7 @@ class MemoryCore:
             user_id=user_id,
             role="user",
             content=message_text,
+            sender_name=sender_name,
             sender_id=user_id,
         )
 

@@ -94,7 +94,7 @@ class ConsolidationManager:
         self._states.clear()
         self._dirty_users.clear()
 
-    async def on_message(self, user_id: str, conversation_text: str):
+    async def on_message(self, user_id: str, conversation_text: str, sender_name: str = ""):
         """
         每次消息调用：计数 → 判断是否触发 → 触发则入队 WarmProcessor
 
@@ -147,7 +147,7 @@ class ConsolidationManager:
         # 6. 触发 → 入队 WarmProcessor（非阻塞）
         logger.info(f"[Memory] 触发整理: uid={user_id} {trigger_reason}")
         if self.warm_processor:
-            await self.warm_processor.enqueue(user_id, conversation_text, state, on_done=self._after_consolidation)
+            await self.warm_processor.enqueue(user_id, conversation_text, state, sender_name, on_done=self._after_consolidation)
 
     # ── 整理完成回调（由 WarmProcessor 执行完毕后调用） ──
 

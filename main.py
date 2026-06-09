@@ -144,7 +144,7 @@ class MemoryPlugin(Star):
             # 记忆注入
             debug_p2 = str(self.memory_core.data_dir) + "/debug_req.txt"
             try:
-                result = await self.memory_core.on_message(event)
+                result = await self.memory_core.on_message(event, sender_name)
                 if result is not None:
                     event.message_obj.message_str = result
                     with open(debug_p2, "a") as f:
@@ -195,6 +195,7 @@ class MemoryPlugin(Star):
         try:
             uid = self.memory_core.context_provider.get_user_id(event)
             txt = self.memory_core.context_provider.get_conversation_text(event)
+            sender_name = self._get_sender_name(event)
 
             # 预过滤：新用户/噪声消息直接丢弃（不经过 LLM）
             # 可在插件配置界面关闭（pre_filter_enabled = false）
@@ -231,7 +232,7 @@ class MemoryPlugin(Star):
             if uid and txt:
                 logger.debug(f"[Memory] on_message: {uid}")
                 task = asyncio.ensure_future(
-                    self.memory_core.consolidation_manager.on_message(uid, txt)
+                    self.memory_core.consolidation_manager.on_message(uid, txt, sender_name)
                 )
                 self.memory_core._background_tasks.add(task)
                 task.add_done_callback(self.memory_core._background_tasks.discard)

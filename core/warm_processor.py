@@ -71,6 +71,7 @@ class WarmProcessor:
         user_id: str,
         conversation_text: str,
         state,
+        sender_name: str = "",
         on_done: Callable | None = None,
     ):
         """将一次整理任务加入后台队列
@@ -79,12 +80,14 @@ class WarmProcessor:
             user_id: 用户 ID
             conversation_text: 待处理的对话文本
             state: PersistedSessionState 对象（用于回调后状态更新）
+            sender_name: 发送者昵称（内部流转用 uid，给 LLM 前用此值）
             on_done: 处理完成后的回调 (user_id, result) -> None
         """
         await self._queue.put({
             "user_id": user_id,
             "text": conversation_text,
             "state": state,
+            "sender_name": sender_name,
             "on_done": on_done,
         })
 
@@ -122,7 +125,8 @@ class WarmProcessor:
         on_done = task.get("on_done")
 
         # 1. 为对话附加用户身份标签（让 LLM 能分清谁说了什么）
-        tagged = await self._tag_conversation(user_id, text)
+        sender_name = task.get("sender_name", "")
+        tagged = await self._tag_conversation(user_id, text, sender_name)
 
         # 2. Judge — LLM 判断值不值得记
         judge = await self._judge(tagged)
@@ -155,20 +159,11 @@ class WarmProcessor:
 
     # ── 流水线各步骤 ──
 
-    async def _tag_conversation(self, user_id: str, text: str) -> str:
-        """给对话文本附加用户显示名"""
+    async def _tag_conversation(self, user_id: str, text: str, sender_name: str = "") -> str:
+        """给对话文本附加用户显示名（内部 uid 流转，给 LLM 前换为昵称）"""
         if not text or text.startswith("["):
             return text
-        display_name = user_id
-        try:
-            if self.capturer and hasattr(self.capturer, 'atom_store'):
-                row = await self.capturer.atom_store.fetchone(
-                    "SELECT user_name FROM user_registry WHERE user_id=?", (user_id,)
-                )
-                if row and row[0]:
-                    display_name = row[0]
-        except Exception:
-            pass
+        display_name = sender_name or user_id
         return f"[{display_name}]: {text}"
 
     async def _judge(self, tagged_text: str):

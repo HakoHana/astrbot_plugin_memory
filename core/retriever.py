@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import jieba
+
 from ..models.memory_atom import MemoryAtom, RecallResult
 from ..storage.atom_store import AtomStore
 from ..storage.diary_store import DiaryStore
@@ -87,21 +89,22 @@ class Retriever:
     })
 
     def _keyword_list(self, text: str) -> list[str]:
-        """提取关键词：Unicode 分词 + 中文 2gram（不加单字，减少噪音）"""
+        """提取关键词：jieba 中文分词 + 纯英文/数字保持原样 + 停用词过滤"""
         tokens = self._segment(text)
         keywords = []
         for token in tokens:
             if re.match(r'^[a-z0-9_]+$', token.lower()):
                 # 纯英文/数字词作为整体
-                if token.lower() not in keywords:
-                    keywords.append(token.lower())
-            else:
-                # 中文：2-gram
-                chars = list(token)
-                for i in range(len(chars) - 1):
-                    bg = chars[i] + chars[i+1]
-                    if bg not in self._ZH_STOP and bg not in keywords:
-                        keywords.append(bg)
+                word = token.lower()
+                if word not in self._ZH_STOP:
+                    keywords.append(word)
+            elif len(token) >= 2:
+                # 中文：jieba 精确分词，过滤停用词和单字
+                words = jieba.lcut(token)
+                for w in words:
+                    w = w.strip()
+                    if len(w) >= 2 and w not in self._ZH_STOP:
+                        keywords.append(w)
         # 去重 + 截断
         seen = set()
         return [k for k in keywords if not (k in seen or seen.add(k))][:15]

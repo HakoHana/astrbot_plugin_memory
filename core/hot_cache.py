@@ -71,7 +71,7 @@ class HotMessageCache:
                 display = name if name else (sid or "用户")
                 lines.append(f"[{display}]: {content}")
             else:
-                lines.append(f"[{bot_name}]: {content}")
+                lines.append(f"[Bot: {bot_name}]: {content}")
         return "\n".join(lines)
 
     # ── 管理 ──

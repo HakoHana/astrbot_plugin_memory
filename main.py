@@ -231,8 +231,18 @@ class MemoryPlugin(Star):
 
             if uid and txt:
                 logger.debug(f"[Memory] on_message: {uid}")
+                # 传完整对话上下文（含 Hana 的回复）而不是单条消息
+                full_ctx = txt
+                cs = self.memory_core.conversation_store
+                if cs:
+                    try:
+                        sid = await cs.get_session_id(event)
+                        bot_name = self.config.get("bot_name", "Hana")
+                        full_ctx = await cs.get_recent_context(sid, limit=10, bot_name=bot_name)
+                    except Exception:
+                        pass
                 task = asyncio.ensure_future(
-                    self.memory_core.consolidation_manager.on_message(uid, txt, sender_name)
+                    self.memory_core.consolidation_manager.on_message(uid, full_ctx, sender_name)
                 )
                 self.memory_core._background_tasks.add(task)
                 task.add_done_callback(self.memory_core._background_tasks.discard)

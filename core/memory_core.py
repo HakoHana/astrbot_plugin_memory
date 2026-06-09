@@ -360,7 +360,7 @@ class MemoryCore:
         """永久删除超过 TTL 的 dormant/forgotten 原子（默认 90 天）"""
         if not self.atom_store:
             return 0
-        ttl_days = float(self.config.get("expired_atom_ttl_days", 90))
+        ttl_days = float(self.config.get("expired_atom_ttl_days", 60))
         cutoff = time.time() - ttl_days * 86400
         cursor = await self.atom_store.execute(
             "DELETE FROM memory_atoms WHERE status IN ('dormant','forgotten') AND created_at < ?",

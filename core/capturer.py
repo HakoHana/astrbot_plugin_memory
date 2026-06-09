@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -165,14 +166,19 @@ class Capturer:
                 except Exception:
                     pass
 
-        # 3. 更新图谱（从 diary content 解析 [[链接]]，原子 entities 合并进入）
-        #    图谱是 diary 写入的副产物，不需要独立调用
+        # 3. 异步更新图谱（fire-and-forget，不阻塞 capture 返回）
+        #    图谱是 diary 写入的副产物，不需要等待
         if diary_id > 0 and self.on_atoms_created:
             all_entities: list[str] = []
             for atom in atoms:
                 all_entities.extend(atom.entities or [])
             try:
-                await self.on_atoms_created(diary_id, diary_content, all_entities)
+                task = asyncio.ensure_future(
+                    self.on_atoms_created(diary_id, diary_content, all_entities)
+                )
+                task.add_done_callback(
+                    lambda t: logger.warning(f"[Capturer] 图谱索引异常: {t.exception()}") if t.exception() else None
+                )
             except Exception:
                 pass
 

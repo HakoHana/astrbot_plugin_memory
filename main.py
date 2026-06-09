@@ -17,7 +17,7 @@ from .core.memory_tools import RecallMemoryTool, MemorizeMemoryTool
     name="Memory",
     author="your_name",
     desc="日记式长期记忆插件 — 让 Bot 记住与用户的每一刻",
-    version="0.2.0",
+    version="0.3.0",
     repo="https://github.com/your_name/astrbot_plugin_memory",
 )
 class MemoryPlugin(Star):

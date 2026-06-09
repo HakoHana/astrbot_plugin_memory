@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from cachetools import TTLCache
 
 from .logger import logger
 from ..storage.atom_store import AtomStore
@@ -65,24 +66,20 @@ class PersonaEngine:
             prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
         )
         self._prompt_inc = _INC_PROMPT
-        self._cache: dict[str, str | None] = {}
-        self._cache_time: float = 0
+        # 每用户 60 秒 TTL 缓存，最多缓存 100 个用户
+        self._cache: TTLCache = TTLCache(maxsize=100, ttl=60)
 
     # ═══════════════════════════════════════════════════
     #  读取（带缓存）
     # ═══════════════════════════════════════════════════
 
     async def get_persona(self, uid: str) -> str | None:
-        """获取用户画像摘要（60s LRU 缓存）"""
-        import time
-        now = time.time()
-        cached = self._cache.get(uid, ...)
-        if cached is not ... and now - self._cache_time < 60:
-            return cached
+        """获取用户画像摘要（TTLCache 60 秒，自动过期）"""
+        if uid in self._cache:
+            return self._cache[uid]
 
         summary = await self.atom_store.get_persona_summary(uid)
         self._cache[uid] = summary
-        self._cache_time = now
         return summary
 
     # ═══════════════════════════════════════════════════

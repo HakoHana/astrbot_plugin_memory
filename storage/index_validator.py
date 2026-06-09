@@ -52,18 +52,50 @@ class IndexValidator(BaseDbStore):
         return result
 
     async def _check_graph_integrity(self) -> dict:
-        """检查图边的外键完整性"""
+        """检查图边的外键完整性（source 和 target 双向检查）并自动修复"""
         result = {"name": "图谱完整性", "passed": True, "issues": []}
         async with self._connect() as db:
-            bad_edges = await db.execute_fetchall("""
+            # 检查 source_node_id 悬挂
+            bad_source = await db.execute_fetchall("""
                 SELECT COUNT(*) FROM graph_edges e
                 LEFT JOIN graph_nodes n ON e.source_node_id = n.id
                 WHERE n.id IS NULL
             """)
-        if bad_edges and bad_edges[0][0] > 0:
+            # 检查 target_node_id 悬挂
+            bad_target = await db.execute_fetchall("""
+                SELECT COUNT(*) FROM graph_edges e
+                LEFT JOIN graph_nodes n ON e.target_node_id = n.id
+                WHERE n.id IS NULL
+            """)
+
+        total_bad = (bad_source[0][0] if bad_source else 0) + (bad_target[0][0] if bad_target else 0)
+        if total_bad > 0:
             result["passed"] = False
-            result["issues"].append(f"存在 {bad_edges[0][0]} 条边指向不存在的节点")
+            result["issues"].append(f"存在 {total_bad} 条边指向不存在的节点")
+            # 自动修复：删除所有悬挂边
+            await self._fix_dangling_edges()
+            result["fixed"] = True
+            result["issues"].append(f"已自动清理 {total_bad} 条悬挂边")
         return result
+
+    async def _fix_dangling_edges(self):
+        """删除 source_node_id 或 target_node_id 悬挂的边"""
+        async with self._connect() as db:
+            await db.execute("""
+                DELETE FROM graph_edges WHERE id IN (
+                    SELECT e.id FROM graph_edges e
+                    LEFT JOIN graph_nodes n ON e.source_node_id = n.id
+                    WHERE n.id IS NULL
+                )
+            """)
+            await db.execute("""
+                DELETE FROM graph_edges WHERE id IN (
+                    SELECT e.id FROM graph_edges e
+                    LEFT JOIN graph_nodes n ON e.target_node_id = n.id
+                    WHERE n.id IS NULL
+                )
+            """)
+            await db.commit()
 
     async def _check_orphan_atoms(self) -> dict:
         """检查没有关联日记的原子"""

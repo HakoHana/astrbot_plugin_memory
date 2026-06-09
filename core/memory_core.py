@@ -25,6 +25,8 @@ from .adapters import LLMProvider, AstrBotLLMProvider, AstrBotContextProvider
 from .capturer import Capturer
 from .persona_engine import PersonaEngine
 from .retriever import Retriever
+from .hot_cache import HotMessageCache
+from .warm_processor import WarmProcessor
 from .memory_injector import MemoryInjector
 from .consolidation_manager import ConsolidationManager
 from .command_handler import CommandHandler
@@ -84,11 +86,13 @@ class MemoryCore:
         self.retriever: Retriever | None = None
         self.injector: MemoryInjector | None = None
         self.consolidation_manager: ConsolidationManager | None = None
+        self.warm_processor: WarmProcessor | None = None
         self.command_handler: CommandHandler | None = None
         self.graph_store: GraphStore | None = None
         self.graph_engine: GraphEngine | None = None
         self.conversation_store: ConversationStore | None = None
         self.write_op_log: WriteOpLog | None = None
+        self.hot_cache = HotMessageCache()
         self._background_tasks: set[asyncio.Task] = set()
 
     async def initialize(self):
@@ -243,19 +247,29 @@ class MemoryCore:
             persona_store=self.persona_store,
             diary_store=self.diary_store,
             config=self.config,
+            hot_cache=self.hot_cache,
+            conversation_store=self.conversation_store,
         )
         self.injector = MemoryInjector(self.config)
 
-        # 6. 调度器
-        self.consolidation_manager = ConsolidationManager(
+        # 6. 后台暖处理队列（异步消费者，所有 LLM 调用走此队列）
+        self.warm_processor = WarmProcessor(
             capturer=self.capturer,
+            graph_engine=self.graph_engine,
             persona_engine=self.persona_engine,
+            config=self.config,
+        )
+        await self.warm_processor.start()
+
+        # 7. 调度器（仅条件计数 + 触发判断，触发后入队 WarmProcessor）
+        self.consolidation_manager = ConsolidationManager(
             state_store=self.state_store,
+            warm_processor=self.warm_processor,
             config=self.config,
         )
         await self.consolidation_manager.initialize()
 
-        # 7. WebUI API
+        # 8. WebUI API
         try:
             from .page_api import PageApi
             self.page_api = PageApi(self)
@@ -263,7 +277,7 @@ class MemoryCore:
         except Exception as e:
             logger.warning(f"[Memory] 注册 WebUI API 失败: {e}")
 
-        # 8. 指令处理器
+        # 9. 指令处理器
         self.command_handler = CommandHandler(
             diary_store=self.diary_store,
             atom_store=self.atom_store,
@@ -463,6 +477,10 @@ class MemoryCore:
 
     async def destroy(self):
         """优雅关闭所有模块"""
+        # 1. 停止后台队列（先排空再取消后台任务）
+        if self.warm_processor:
+            await self.warm_processor.stop()
+
         if self.consolidation_manager:
             await self.consolidation_manager.destroy()
 
@@ -504,6 +522,14 @@ class MemoryCore:
 
         if not user_id or not message_text:
             return None
+
+        # 0. 写入热缓存（内存 deque，免查 DB）
+        self.hot_cache.push(
+            user_id=user_id,
+            role="user",
+            content=message_text,
+            sender_id=user_id,
+        )
 
         # 检查是否是指令
         if message_text.startswith("/"):
@@ -592,9 +618,7 @@ class MemoryCore:
             cm = self.consolidation_manager
             cm.trigger_msg_count = config.get("trigger_msg_count", cm.trigger_msg_count)
             cm.trigger_time_minutes = config.get("trigger_time_minutes", cm.trigger_time_minutes)
-            cm.immediate_capture = config.get("immediate_capture", cm.immediate_capture)
             cm.warmup_enabled = config.get("warmup_enabled", cm.warmup_enabled)
-            cm.persona_update_interval = config.get("persona_update_interval", cm.persona_update_interval)
         self._apply_provider_config()
 
     def _apply_provider_config(self):

@@ -5,5 +5,17 @@
 """
 
 import logging
+import sys
 
 logger = logging.getLogger("memory")
+logger.setLevel(logging.DEBUG)
+
+# 确保有 handler 输出到 stderr（与 AstrBot 日志流兼容）
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter(
+        "[Memory] %(levelname)s %(message)s"
+    ))
+    logger.addHandler(handler)
+    logger.propagate = False  # 不传播，避免重复

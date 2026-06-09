@@ -324,6 +324,12 @@ class MemoryCore:
                     f"UPDATE atomic_facts SET importance = importance * {rate} WHERE importance > 0.1"
                 )
                 logger.info(f"[Memory] 重要度衰减完成 (rate={rate})")
+
+                # 每日清理过期的 dormant/forgotten 原子
+                try:
+                    await self._cleanup_expired_atoms()
+                except Exception as e:
+                    logger.warning(f"[Memory] 过期原子清理异常: {e}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -348,6 +354,25 @@ class MemoryCore:
             await self.atom_store.execute(
                 "DELETE FROM memory_atoms_fts WHERE atom_id NOT IN (SELECT id FROM memory_atoms WHERE status IN ('active','dormant'))"
             )
+        return count
+
+    async def _cleanup_expired_atoms(self):
+        """永久删除超过 TTL 的 dormant/forgotten 原子（默认 90 天）"""
+        if not self.atom_store:
+            return 0
+        ttl_days = float(self.config.get("expired_atom_ttl_days", 90))
+        cutoff = time.time() - ttl_days * 86400
+        cursor = await self.atom_store.execute(
+            "DELETE FROM memory_atoms WHERE status IN ('dormant','forgotten') AND created_at < ?",
+            (cutoff,),
+        )
+        count = cursor.rowcount if cursor else 0
+        if count > 0:
+            # 同步清理 FTS
+            await self.atom_store.execute(
+                "DELETE FROM memory_atoms_fts WHERE atom_id NOT IN (SELECT id FROM memory_atoms)"
+            )
+            logger.info(f"[Memory] 清理了 {count} 条过期原子 (>{ttl_days:.0f}天)")
         return count
 
     async def _archive_loop(self):

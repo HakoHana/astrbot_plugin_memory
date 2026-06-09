@@ -7,6 +7,7 @@ from typing import Any
 from ...models.memory_atom import MemoryAtom
 from ...storage.graph_store import GraphStore
 from ...storage.atom_store import AtomStore
+from ..logger import logger
 
 
 class GraphEntityRetriever:
@@ -41,6 +42,7 @@ class GraphEntityRetriever:
         # 1. 关键词 → 匹配实体/主题节点
         matched_nodes = await self._match_nodes(keywords)
         if not matched_nodes:
+            logger.debug(f"[GraphEntity] 未匹配到图谱节点 keywords={keywords}")
             return []
 
         # 2. 沿 mentions/has_meta 边找关联 diary_id
@@ -48,11 +50,13 @@ class GraphEntityRetriever:
         diary_ids = await self._find_linked_diaries(node_ids)
 
         if not diary_ids:
+            logger.debug(f"[GraphEntity] 节点{node_ids}未关联到日记")
             return []
 
         # 3. diary_id → atomic_facts / memory_atoms
         atoms = await self._fetch_atoms_from_diaries(diary_ids, user_ids, k)
 
+        logger.debug(f"[GraphEntity] 节点={node_ids} 日记={diary_ids} 命中={len(atoms)}")
         return atoms
 
     async def _match_nodes(self, keywords: list[str]) -> list[dict]:
@@ -145,8 +149,9 @@ class GraphEntityRetriever:
             if fact_rows:
                 # 转成 MemoryAtom 风格
                 return [self._fact_row_to_atom(r, user_ids[0]) for r in fact_rows[:k]]
-        except Exception:
-            pass
+            logger.debug(f"[GraphEntity] atomic_facts 路径无结果 diary_ids={diary_ids}")
+        except Exception as e:
+            logger.debug(f"[GraphEntity] atomic_facts 查询异常: {e}")
 
         # 路径 B：回退到 memory_atoms
         try:
@@ -170,13 +175,13 @@ class GraphEntityRetriever:
     def _fact_row_to_atom(row, user_id: str) -> MemoryAtom:
         """将 atomic_facts 行包装为 MemoryAtom（兼容下游接口）"""
         from ...models.memory_atom import MemoryAtom, AtomType
-        import time
         return MemoryAtom(
             atom_id=row[0],
             user_id=user_id,
+            diary_date="",  # atomic_facts 没有日记日期
             content=row[1],
             atom_type=AtomType(row[2]) if row[2] else AtomType.factual,
             importance=float(row[3]) if row[3] else 0.5,
             confidence=float(row[4]) if row[4] else 0.8,
-            created_at=str(row[5]) if row[5] else time.strftime("%Y-%m-%d"),
+            created_at=float(row[5]) if row[5] else 0.0,
         )

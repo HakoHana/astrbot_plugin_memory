@@ -249,6 +249,7 @@ class MemoryCore:
             config=self.config,
             hot_cache=self.hot_cache,
             conversation_store=self.conversation_store,
+            graph_store=self.graph_store,
         )
         self.injector = MemoryInjector(self.config)
 

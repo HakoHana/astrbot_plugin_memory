@@ -1,4 +1,4 @@
-"""检索引擎 — 召回相关记忆（混合：RRF 多路融合 + 热缓存）"""
+"""检索引擎 — 召回相关记忆（双路检索：BM25 文档路 + Graph 图路 + RRF 融合）"""
 
 from __future__ import annotations
 
@@ -9,15 +9,18 @@ from ..models.memory_atom import MemoryAtom, RecallResult
 from ..storage.atom_store import AtomStore
 from ..storage.diary_store import DiaryStore
 from ..storage.persona_store import PersonaStore
+from ..storage.graph_store import GraphStore
+from .logger import logger
+from .retrieval import DualRouteRetriever, BM25Retriever, GraphEntityRetriever
 
 
 class Retriever:
     """
     记忆检索引擎
 
-    双通道检索：
-    - 原子事实（atomic_facts 结构化匹配）
-    - 日记全文（diary_fts FTS5）
+    双路检索 + RRF 融合：
+    - BM25 文档路：memory_atoms_fts FTS5 全文检索
+    - Graph 图路：entity → graph_edges → diary → fact
 
     热缓存：
     - get_recent_context() 优先从 HotMessageCache 读取
@@ -32,6 +35,7 @@ class Retriever:
         config: dict[str, Any] | None = None,
         hot_cache=None,
         conversation_store=None,
+        graph_store: GraphStore | None = None,
     ):
         self.atom_store = atom_store
         self.persona_store = persona_store
@@ -41,6 +45,14 @@ class Retriever:
         self.conversation_store = conversation_store
         self.recall_count = self.config.get("recall_count", 5)
         self.recall_max_tokens = self.config.get("recall_max_tokens", 500)
+
+        # 双路检索引擎（图路需要 graph_store）
+        self.dual_route: DualRouteRetriever | None = None
+        if graph_store:
+            self.dual_route = DualRouteRetriever(
+                bm25_retriever=BM25Retriever(atom_store),
+                graph_retriever=GraphEntityRetriever(graph_store, atom_store),
+            )
 
     # ── RRF 融合 ──
     RRF_K = 60
@@ -95,7 +107,11 @@ class Retriever:
         return [k for k in keywords if not (k in seen or seen.add(k))][:15]
 
     async def recall(self, user_id: str, query: str, k: int | None = None) -> list[MemoryAtom]:
-        """召回：关键词匹配计数 + 重要度 加权排序"""
+        """召回：双路检索（BM25 文档路 + Graph 图路）→ RRF 融合
+
+        图路未就绪时回退到单 BM25 检索，
+        全未命中时按重要度降序兜底。
+        """
         k = k or self.recall_count
         if not query or not query.strip():
             return []
@@ -104,26 +120,14 @@ class Retriever:
         all_uids = list(set([user_id] + extra_ids))
         keywords = self._keyword_list(query)
 
-        # ── 关键词计数 ──
-        score: dict[int, float] = {}
-        atoms: dict[int, MemoryAtom] = {}
-        for kw in keywords:
-            for uid in all_uids:
-                try:
-                    rows = await self.atom_store.fetch(
-                        "SELECT * FROM memory_atoms WHERE user_id=? AND status='active' AND content LIKE ? ORDER BY importance DESC LIMIT ?",
-                        (uid, f"%{kw}%", k * 4),
-                    )
-                    for r in rows:
-                        atom = self.atom_store._row_to_atom(r)
-                        aid = atom.atom_id
-                        score[aid] = score.get(aid, 0.0) + 1.0  # 每匹配一个关键词 +1
-                        atoms[aid] = atom
-                except Exception:
-                    pass
+        # ── 双路检索 ──
+        atoms: list[MemoryAtom] = []
+        if self.dual_route:
+            atoms = await self.dual_route.retrieve(keywords, all_uids, k)
 
-        # ── 关键词未命中时，重要度回退 ──
+        # ── 双路未命中时，重要度降序回退 ──
         if len(atoms) < k:
+            seen_ids = {a.atom_id for a in atoms}
             for uid in all_uids:
                 try:
                     rows = await self.atom_store.fetch(
@@ -132,30 +136,20 @@ class Retriever:
                     )
                     for r in rows:
                         atom = self.atom_store._row_to_atom(r)
-                        aid = atom.atom_id
-                        if aid not in atoms:
-                            score[aid] = 0.0
-                            atoms[aid] = atom
+                        if atom.atom_id not in seen_ids:
+                            atoms.append(atom)
+                            seen_ids.add(atom.atom_id)
+                            if len(atoms) >= k:
+                                break
                 except Exception:
                     pass
 
-        # ── 综合评分排序 ──
-        max_id = max(atoms.keys()) if atoms else 1
-        def _sort_key(a: MemoryAtom) -> tuple:
-            s = score[a.atom_id]
-            c = a.content or ""
-            meta = 3 if re.match(r'^(一位|用户)', c) else 0
-            age = a.atom_id / max_id  # 0=最旧 1=最新
-            # 匹配数×0.2 + 重要度×0.5 + 年龄优势×0.3 - 元描述惩罚
-            combined = s * 0.2 + a.importance * 0.5 + (1 - age) * 0.3 - meta * 0.1
-            return (-combined, a.atom_id)
-
-        sorted_atoms = sorted(atoms.values(), key=_sort_key)
-
         with open('/tmp/recall_debug.txt', 'a') as _f:
-            _f.write(f"recall uid={user_id} matched={len(atoms)} returned={min(k, len(sorted_atoms))} keywords={keywords}\n")
+            _f.write(f"recall uid={user_id} returned={len(atoms)} keywords={keywords}\n")
+            if atoms:
+                _f.write(f"  first: {atoms[0].content[:50]}\n")
 
-        return sorted_atoms[:k]
+        return atoms[:k]
 
     async def get_context_memories(
         self, user_id: str, query: str, k: int | None = None

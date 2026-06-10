@@ -46,24 +46,76 @@ async def process_event(body: EventRequest, core: MemoryCore = Depends(get_core)
 #  记忆检索
 # ═══════════════════════════════════════════════════════════
 
-@router.get("/v1/memories", response_model=MemorySearchResult)
-async def search_memories(
+@router.get("/v1/memories")
+async def list_memories(
+    request: Request,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     q: str = Query("", description="搜索关键词"),
     uid: str = Query("", description="用户 ID"),
-    k: int = Query(5, ge=1, le=50),
     core: MemoryCore = Depends(get_core),
 ):
-    """按关键词检索记忆"""
-    if not q or not uid:
-        return MemorySearchResult(results=[], total=0)
+    """记忆列表（分页）或搜索"""
+    import json
 
-    atoms = await core.retriever.recall(uid, q, k)
-    results = [
-        MemoryAtomOut(id=a.atom_id, content=a.content, atom_type=a.atom_type.value,
-                      importance=a.importance, diary_date=a.diary_date)
-        for a in atoms
-    ]
-    return MemorySearchResult(results=results, total=len(results))
+    # 搜索模式
+    if q and uid:
+        atoms = await core.retriever.recall(uid, q, 5)
+        results = [
+            {"id": a.atom_id, "content": a.content, "type": a.atom_type.value,
+             "importance": a.importance, "date": a.diary_date}
+            for a in atoms
+        ]
+        return {"ok": True, "results": results, "total": len(results)}
+
+    # 列表模式（日记分页）
+    offset = (page - 1) * size
+    if uid:
+        rows = await core.atom_store.fetch(
+            "SELECT id, user_id, date, importance, sentiment, topics, created_at, content FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT ? OFFSET ?",
+            (uid, size, offset),
+        )
+        total = (await core.atom_store.fetchone(
+            "SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)
+        ))[0]
+    else:
+        rows = await core.atom_store.fetch(
+            "SELECT id, user_id, date, importance, sentiment, topics, created_at, content FROM diary_entries ORDER BY date DESC LIMIT ? OFFSET ?",
+            (size, offset),
+        )
+        total = (await core.atom_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
+
+    items = []
+    for r in rows:
+        topics_raw = r[5]
+        topics = []
+        if topics_raw:
+            try:
+                topics = json.loads(topics_raw) if isinstance(topics_raw, str) else topics_raw
+            except Exception:
+                topics = [str(topics_raw)]
+        content_raw = r[7] or ""
+        # 提取纯文本摘要（去掉 frontmatter）
+        summary = content_raw[:200]
+        if summary.startswith("---"):
+            end = summary.find("---", 3)
+            if end != -1:
+                summary = summary[end + 5:].strip()
+        items.append({
+            "id": r[0],
+            "memory_id": r[0],
+            "user_id": r[1],
+            "date": r[2],
+            "content": summary[:200],
+            "importance": r[3],
+            "avg_importance": r[3],
+            "sentiment": r[4],
+            "topics": topics,
+            "updated_at": r[6],
+            "status": "active",
+            "atom_count": 0,
+        })
+    return {"ok": True, "items": items, "total": total}
 
 
 @router.get("/v1/memories/{memory_id}", response_model=dict)
@@ -194,7 +246,8 @@ async def list_diaries(
                 topics = [str(topics_raw)]
         items.append({
             "id": r[0], "user_id": r[1], "date": r[2],
-            "importance": r[3], "sentiment": r[4], "topics": topics,
+            "importance": r[3],
+            "avg_importance": r[3], "sentiment": r[4], "topics": topics,
         })
     return {"ok": True, "items": items, "total": total, "page": page, "size": size}
 
@@ -526,3 +579,10 @@ async def save_providers(body: dict, request: Request, core: MemoryCore = Depend
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(core.config, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True, "count": len(providers)}
+
+
+@router.post("/v1/shutdown")
+async def shutdown():
+    """停止 memori 服务"""
+    import os
+    os._exit(0)

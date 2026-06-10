@@ -37,31 +37,36 @@
   /* ================================================================
      Bridge helpers
      ================================================================ */
-  function buildEndpoint(path) {
-    return ("page/" + String(path).replace(/^\/+/, "")).replace(/\/+/g, "/");
-  }
-
   async function requestGraph(path, options) {
     options = options || {};
-    var bridge = window.AstrBotPluginPage;
-    if (!bridge) throw new Error(window.t("graph.bridgeError"));
-
     var method = (options.method || "GET").toUpperCase();
-    if (method === "GET") {
-      var qi = path.indexOf("?");
-      if (qi !== -1) {
-        var base = path.substring(0, qi);
-        var qs = path.substring(qi + 1);
-        var params = {};
-        new URLSearchParams(qs).forEach(function(v, k) { params[k] = v; });
-        return unwrapGraphData(await bridge.apiGet(buildEndpoint(base), params));
+    var url = "/api/v1/" + path.replace(/^\/+/, "");
+
+    try {
+      var resp = await fetch(url);
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      return unwrapGraphData(await resp.json());
+    } catch (e) {
+      // 尝试备用路径（graph 查询可能是 POST）
+      if (method === "POST") {
+        var resp2 = await fetch(url, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(options.body || {}),
+        });
+        if (!resp2.ok) throw new Error("HTTP " + resp2.status);
+        return unwrapGraphData(await resp2.json());
       }
-      return unwrapGraphData(await bridge.apiGet(buildEndpoint(path), {}));
+      throw e;
     }
-    return unwrapGraphData(await bridge.apiPost(buildEndpoint(path), options.body || {}));
   }
 
   function unwrapGraphData(response) {
+    // memori 新格式: { ok: true, ... }
+    if (response && response.ok === true) {
+      return response;
+    }
+    // 旧格式: { status: "ok", data: {...} }
     if (response && response.status === "ok" && Object.prototype.hasOwnProperty.call(response, "data")) {
       return response.data || {};
     }

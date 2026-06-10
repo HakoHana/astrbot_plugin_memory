@@ -1594,11 +1594,6 @@
       applyTheme(readTheme());
       listenBridgeTheme();
 
-      var bridge = window.AstrBotPluginPage;
-      if (bridge && typeof bridge.ready === "function") {
-        try { await bridge.ready(); } catch (_) {}
-      }
-
       initSidebar();
       initMemoryPage();
       initRecallPage();

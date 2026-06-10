@@ -378,3 +378,69 @@ async def trigger_decay(core: MemoryCore = Depends(get_core)):
         f"UPDATE atomic_facts SET importance = importance * {rate} WHERE importance > 0.1"
     )
     return {"ok": True, "decay_rate": rate}
+
+
+# ═══════════════════════════════════════════════════════════
+#  配置
+# ═══════════════════════════════════════════════════════════
+
+_CONFIG_META = {
+    "bot_name": {"type": "string", "default": "Hana", "label": "Bot 名称", "group": "基础"},
+    "recall_count": {"type": "int", "default": 5, "label": "召回条数", "group": "检索"},
+    "recall_max_tokens": {"type": "int", "default": 500, "label": "召回 token 上限", "group": "检索"},
+    "injection_position": {
+        "type": "select", "default": "system_prompt_suffix",
+        "options": ["system_prompt_suffix", "user_message_prefix", "user_message_suffix", "knowledge_section", "manual_only"],
+        "label": "记忆注入位置", "group": "注入",
+    },
+    "injection_use_tag": {"type": "bool", "default": True, "label": "启用 <memory> 标签包裹", "group": "注入"},
+    "trigger_msg_count": {"type": "int", "default": 10, "label": "整理触发消息数", "group": "整理"},
+    "trigger_time_minutes": {"type": "int", "default": 360, "label": "整理触发间隔(分钟)", "group": "整理"},
+    "warmup_enabled": {"type": "bool", "default": True, "label": "暖启动", "group": "整理"},
+    "idle_timeout_minutes": {"type": "int", "default": 30, "label": "闲置超时(分钟)", "group": "整理"},
+    "max_l1_retries": {"type": "int", "default": 3, "label": "LLM 调用重试次数", "group": "整理"},
+    "persona_update_interval": {"type": "int", "default": 10, "label": "画像更新间隔(日记数)", "group": "整理"},
+    "max_diary_tokens": {"type": "int", "default": 500, "label": "日记 token 上限", "group": "记忆"},
+    "decay_rate": {"type": "float", "default": 0.99, "label": "日衰减率", "group": "衰减"},
+    "decay_enabled": {"type": "bool", "default": True, "label": "启用衰减", "group": "衰减"},
+    "expired_atom_ttl_days": {"type": "int", "default": 60, "label": "过期原子保留天数", "group": "衰减"},
+    "warm_days": {"type": "int", "default": 90, "label": "归档天数阈值", "group": "归档"},
+    "cold_importance_threshold": {"type": "float", "default": 0.1, "label": "归档重要度阈值", "group": "归档"},
+}
+
+
+@router.get("/v1/config")
+async def get_config(core: MemoryCore = Depends(get_core)):
+    """获取当前配置（含元数据）"""
+    groups = {}
+    for key, meta in _CONFIG_META.items():
+        group = meta["group"]
+        if group not in groups:
+            groups[group] = []
+        current = core.config.get(key, meta["default"])
+        groups[group].append({
+            "key": key,
+            "value": current,
+            **meta,
+        })
+    return {"ok": True, "groups": groups}
+
+
+@router.put("/v1/config")
+async def update_config(body: dict, core: MemoryCore = Depends(get_core)):
+    """更新配置项"""
+    valid_keys = set(_CONFIG_META.keys())
+    for key, value in body.items():
+        if key not in valid_keys:
+            continue
+        meta = _CONFIG_META[key]
+        # 类型校验
+        if meta["type"] == "int":
+            value = int(value)
+        elif meta["type"] == "float":
+            value = float(value)
+        elif meta["type"] == "bool":
+            value = bool(value)
+        core.config[key] = value
+    core.reload_config(core.config)
+    return {"ok": True, "updated": list(body.keys())}

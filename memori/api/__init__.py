@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from ..core.memory_core import MemoryCore
 from .routes import router
@@ -101,6 +101,14 @@ def create_app(
 
     # 路由
     app.include_router(router, prefix="/api")
+
+    # 配置页面
+    from pathlib import Path
+    _ui_path = Path(__file__).parent / "webui_config.html"
+
+    @app.get("/config")
+    async def config_page():
+        return HTMLResponse(content=_ui_path.read_text(encoding="utf-8"))
 
     # 健康检查
     @app.get("/health")

@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from ..core.memory_core import MemoryCore
 from .routes import router
@@ -217,6 +218,11 @@ def create_app(
         app.state.memory_core = memory_core
 
     app.include_router(router, prefix="/api")
+
+    # WebUI 静态文件
+    _webui_path = Path(__file__).parent.parent.parent / "webui"
+    if _webui_path.exists():
+        app.mount("/webui", StaticFiles(directory=str(_webui_path)), name="webui")
 
     _ui_path = Path(__file__).parent / "webui_config.html"
 

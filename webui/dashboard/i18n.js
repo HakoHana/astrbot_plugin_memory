@@ -39,6 +39,7 @@
     "nav.recallTest":     { zh: "召回测试", en: "Recall Test", ru: "Тест поиска" },
     "nav.persons":        { zh: "用户画像", en: "Personas", ru: "Профили" },
     "nav.system":         { zh: "系统概览", en: "System", ru: "Система" },
+    "nav.settings":       { zh: "系统配置", en: "Settings", ru: "Настройки" },
     "nav.recall":         { zh: "召回测试", en: "Recall Test", ru: "Тест поиска" },
 
     /* ---- Nuke ---- */

@@ -369,6 +369,30 @@
     if (name === "memory" || name === "memories") { fetchMemories(); }
     if (name === "persons") { fetchPersonas(); }
     if (name === "system") { fetchSystemOverview(); }
+    if (name === "settings") { loadSettingsPage(); }
+  }
+
+  async function loadSettingsPage() {
+    var body = document.getElementById("settings-body");
+    if (!body) return;
+    var loading = document.getElementById("settings-loading");
+    if (loading) loading.style.display = "block";
+    try {
+      var resp = await fetch("/config");
+      var html = await resp.text();
+      var match = html.match(/<body>([\s\S]*?)<\/body>/i);
+      var content = match ? match[1] : html;
+      content = content.replace(/<h1>.*?<\/h1>/, "");
+      body.innerHTML = content;
+      body.querySelectorAll("script").forEach(function(oldScript) {
+        var newScript = document.createElement("script");
+        newScript.textContent = oldScript.textContent;
+        document.body.appendChild(newScript);
+      });
+    } catch (e) {
+      body.innerHTML = '<p style="color:red;padding:20px">配置加载失败: ' + e.message + '</p>';
+    }
+    if (loading) loading.style.display = "none";
   }
 
   function initSidebar() {

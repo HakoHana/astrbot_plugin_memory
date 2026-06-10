@@ -374,17 +374,21 @@
 
   async function loadSettingsPage() {
     var body = document.getElementById("settings-body");
-    if (!body) return;
+    if (!body) { alert("settings-body not found"); return; }
     var loading = document.getElementById("settings-loading");
     if (loading) loading.style.display = "block";
     try {
       var resp = await fetch("/api/v1/config");
       var data = await resp.json();
       if (!data.ok) throw new Error(data.error || "加载失败");
-      body.innerHTML = buildSettingsHTML(data.groups);
+      console.log("Config groups:", Object.keys(data.groups || {}));
+      var html = buildSettingsHTML(data.groups);
+      console.log("HTML length:", html.length);
+      body.innerHTML = html;
       loadProvsForSettings();
     } catch (e) {
-      body.innerHTML = '<p style="color:red;padding:20px">加载失败: ' + e.message + '</p>';
+      console.error("Settings error:", e);
+      body.innerHTML = '<p style="color:red;padding:20px">⚠️ ' + e.message + '</p>';
     }
     if (loading) loading.style.display = "none";
   }

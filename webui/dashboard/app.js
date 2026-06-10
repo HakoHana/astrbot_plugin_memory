@@ -378,21 +378,100 @@
     var loading = document.getElementById("settings-loading");
     if (loading) loading.style.display = "block";
     try {
-      var resp = await fetch("/config");
-      var html = await resp.text();
-      var match = html.match(/<body>([\s\S]*?)<\/body>/i);
-      var content = match ? match[1] : html;
-      content = content.replace(/<h1>.*?<\/h1>/, "");
-      body.innerHTML = content;
-      body.querySelectorAll("script").forEach(function(oldScript) {
-        var newScript = document.createElement("script");
-        newScript.textContent = oldScript.textContent;
-        document.body.appendChild(newScript);
-      });
+      var resp = await fetch("/api/v1/config");
+      var data = await resp.json();
+      if (!data.ok) throw new Error(data.error || "加载失败");
+      body.innerHTML = buildSettingsHTML(data.groups);
+      loadProvsForSettings();
     } catch (e) {
-      body.innerHTML = '<p style="color:red;padding:20px">配置加载失败: ' + e.message + '</p>';
+      body.innerHTML = '<p style="color:red;padding:20px">加载失败: ' + e.message + '</p>';
     }
     if (loading) loading.style.display = "none";
+  }
+
+  function buildSettingsHTML(groups) {
+    var html = "";
+    for (var [name, fields] of Object.entries(groups)) {
+      if (name === "模型提供商") continue;
+      html += '<div class="card"><h2>' + esc(name) + '</h2>';
+      for (var f of fields) {
+        var id = "cfg_" + f.key;
+        var val = f.value;
+        var hint = f.hint ? '<span class="field-hint">' + esc(f.hint) + '</span>' : "";
+        var input = "";
+        if (f.type === "bool") {
+          input = '<label class="field-label"><input type="checkbox" id="' + id + '" ' + (val ? "checked" : "") + '> ' + esc(f.label) + hint + "</label>";
+          html += '<div class="field">' + input + "</div>";
+          continue;
+        } else if (f.type === "text") {
+          input = '<textarea id="' + id + '" rows="3">' + esc(val) + "</textarea>";
+        } else if (f.type === "select") {
+          input = '<select id="' + id + '">' + f.options.map(function(o) { return '<option value="' + o + '"' + (val === o ? " selected" : "") + ">" + o + "</option>"; }).join("") + "</select>";
+        } else {
+          input = '<input type="text" id="' + id + '" value="' + esc(val) + '">';
+        }
+        html += '<div class="field"><label class="field-label">' + esc(f.label) + hint + "</label>" + input + "</div>";
+      }
+      html += "</div>";
+    }
+    // 模型提供商
+    html += '<div class="card"><h2> 模型提供商</h2>';
+    html += '<p style="color:#888;font-size:0.85em;margin-bottom:12px">在「基础」中选用的 ID 需与此处一致</p>';
+    html += '<table class="settings-prov-table"><thead><tr>';
+    html += '<th>ID</th><th>API 地址</th><th>API Key</th><th>模型</th><th></th>';
+    html += '</tr></thead><tbody id="settings-prov-tbody"></tbody></table>';
+    html += '<button class="btn btn-sm btn-secondary" onclick="addProvRow()" style="margin-top:8px">+ 添加</button></div>';
+    html += '<button class="btn btn-primary" onclick="saveAllSettings()" style="margin-top:16px;padding:10px 32px;border:none;border-radius:8px;background:#06c;color:#fff;font-size:1em;cursor:pointer;width:100%"> 保存全部</button>';
+    return html;
+  }
+
+  // ── 模型提供商（设置页） ──
+  async function loadProvsForSettings() {
+    var resp = await fetch("/api/v1/providers");
+    var data = await resp.json();
+    var tb = document.getElementById("settings-prov-tbody");
+    if (!tb) return;
+    tb.innerHTML = "";
+    for (var p of data.providers || []) addProvRow(p);
+  }
+  function addProvRow(p) {
+    var tb = document.getElementById("settings-prov-tbody");
+    var tr = document.createElement("tr");
+    tr.innerHTML = '<td><input class="pv_n" value="' + esc(p.name || "") + '" placeholder="my-llm"></td>' +
+      '<td><input class="pv_b" value="' + esc(p.api_base || "") + '" placeholder="https://api.openai.com/v1"></td>' +
+      '<td><input class="pv_k" type="password" value="' + esc(p.api_key || "") + '"></td>' +
+      '<td><input class="pv_m" value="' + esc(p.model || "") + '" placeholder="gpt-4o"></td>' +
+      '<td><button class="btn-sm-text" onclick="this.closest(\'tr\').remove()">✕</button></td>';
+    tb.appendChild(tr);
+  }
+
+  async function saveAllSettings() {
+    // 提供商
+    var providers = [];
+    document.querySelectorAll("#settings-prov-tbody tr").forEach(function(tr) {
+      var name = tr.querySelector(".pv_n")?.value?.trim();
+      if (!name) return;
+      providers.push({ name: name, api_base: tr.querySelector(".pv_b")?.value?.trim() || "",
+        api_key: tr.querySelector(".pv_k")?.value || "", model: tr.querySelector(".pv_m")?.value?.trim() || "" });
+    });
+    await fetch("/api/v1/providers", { method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify({providers: providers}) });
+
+    // 配置
+    var body = {};
+    document.querySelectorAll("#page-settings .card").forEach(function(card) {
+      if (card.querySelector("h2")?.textContent?.includes("模型提供商")) return;
+      card.querySelectorAll(".field").forEach(function(field) {
+        var input = field.querySelector("input, select, textarea");
+        if (!input) return;
+        var key = input.id.replace("cfg_", "");
+        if (input.type === "checkbox") body[key] = input.checked;
+        else if (input.tagName === "SELECT") body[key] = input.value;
+        else body[key] = input.value;
+      });
+    });
+    var resp = await fetch("/api/v1/config", { method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    var data = await resp.json();
+    showToast(data.ok ? "✅ 已保存" : "❌ 保存失败");
   }
 
   function initSidebar() {

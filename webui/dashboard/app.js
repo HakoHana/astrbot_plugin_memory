@@ -32,11 +32,46 @@
   };
 
   /* ================================================================
-     Bridge Helpers
+     Memori API — 直接调用独立记忆系统
      ================================================================ */
-  function buildEndpoint(path) {
-    var cleanPath = String(path).replace(/^\/+/, "");
-    return "page/" + cleanPath.replace(/\/+/g, "/");
+  var API_BASE = "/api/v1";
+
+  // 旧 AstrBot 路径 → 新 memori API 路径映射
+  var API_MAP = {
+    "stats":                          "/stats",
+    "memories":                       "/memories",
+    "memories/day":                   "/memories",
+    "memories/update":                "/memories",
+    "memories/delete":                "/memories",
+    "memories/batch-delete":          "/memories",
+    "memories/batch-update":          "/memories",
+    "graph/overview":                 "/graph/overview",
+    "graph/query":                    "/graph/query",
+    "users":                          "/users",
+    "users/detail":                   "/users",
+    "diary":                          "/diaries",
+    "diary/update":                   "/diaries",
+  };
+
+  function mapApiPath(path) {
+    // 分离路径和查询参数
+    var qi = path.indexOf("?");
+    var base = qi !== -1 ? path.substring(0, qi) : path;
+    var qs = qi !== -1 ? path.substring(qi + 1) : "";
+    // 查找映射
+    var mapped = API_MAP[base] || "/" + base;
+    // 处理 memories/day?did=X → /memories/{id}
+    if (base === "memories/day" && qs.startsWith("did=")) {
+      var id = qs.substring(4).split("&")[0];
+      return mapped + "/" + id;
+    }
+    // 处理 users/detail?uid=X → /users/{uid}
+    if (base === "users/detail" && qs.startsWith("uid=")) {
+      var uid = qs.substring(4).split("&")[0];
+      return mapped + "/" + encodeURIComponent(uid);
+    }
+    // 其他：保留查询参数
+    return mapped + (qs ? "?" + qs : "");
   }
 
   async function apiRequest(path, options) {
@@ -44,39 +79,66 @@
     var method = options.method || "GET";
     var body = options.body;
     var retries = options.retries || 2;
-    var bridge = window.AstrBotPluginPage;
-    if (!bridge) throw new Error(window.t("bridge.error"));
+    var base = path.indexOf("?") !== -1 ? path.substring(0, path.indexOf("?")) : path;
 
+    // 特殊处理：memories/delete → DELETE /memories/{id}
+    if ((base === "memories/delete") && body && body.id) {
+      var delResp = await fetch(API_BASE + "/memories/" + body.id, { method: "DELETE" });
+      if (!delResp.ok) throw new Error("HTTP " + delResp.status);
+      return await delResp.json();
+    }
+    // 批量删除
+    if ((base === "memories/batch-delete") && body && body.ids) {
+      for (var i = 0; i < body.ids.length; i++) {
+        await apiRequest("memories/delete", { method: "POST", body: { id: body.ids[i] } });
+      }
+      return { ok: true };
+    }
+    // 特殊处理：memories/update → PUT /memories/{id} 并转换 field/value 格式
+    if ((base === "memories/update") && body && body.memory_id) {
+      var upBody = {};
+      if (body.field === "content") upBody.content = body.value;
+      else if (body.field === "importance") upBody.importance = parseFloat(body.value);
+      else if (body.field === "status") upBody.status = body.value;
+      var upResp = await fetch(API_BASE + "/memories/" + body.memory_id, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(upBody),
+      });
+      if (!upResp.ok) throw new Error("HTTP " + upResp.status);
+      return await upResp.json();
+    }
+
+    var url = API_BASE + mapApiPath(path);
     var lastError;
     for (var attempt = 0; attempt <= retries; attempt++) {
       try {
-        if (method === "GET") {
-          var qi = path.indexOf("?");
-          if (qi !== -1) {
-            var base = path.substring(0, qi);
-            var qs = path.substring(qi + 1);
-            var params = {};
-            new URLSearchParams(qs).forEach(function(v, k) { params[k] = v; });
-            return await bridge.apiGet(buildEndpoint(base), params);
-          }
-          return await bridge.apiGet(buildEndpoint(path), {});
-        }
-        return await bridge.apiPost(buildEndpoint(path), body || {});
+        var fetchOpts = { method: method, headers: { "Content-Type": "application/json" } };
+        if (body && method !== "GET") fetchOpts.body = JSON.stringify(body);
+        var resp = await fetch(url, fetchOpts);
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return await resp.json();
       } catch (e) {
         lastError = e;
         if (attempt === retries) throw e;
         await new Promise(function(r) { setTimeout(r, Math.min(1000 * Math.pow(2, attempt), 5000)); });
       }
     }
-    throw lastError || new Error(window.t("misc.requestFailed"));
+    throw lastError || new Error("请求失败");
   }
 
   function unwrapApiData(response) {
+    if (!response) return {};
+    // memori 新格式: { ok: true, ... }
+    if (response.ok === true) {
+      // 移除 ok 字段，返回剩余数据
+      var data = Object.assign({}, response);
+      delete data.ok;
+      return data;
+    }
+    // 兼容旧格式: { status: "ok", data: {...} }
     if (response && response.status === "ok" && Object.prototype.hasOwnProperty.call(response, "data")) {
       return response.data || {};
-    }
-    if (response && response.status === "error") {
-      throw new Error(response.message || window.t("misc.requestFailed"));
     }
     return response || {};
   }
@@ -166,11 +228,8 @@
      ================================================================ */
   function readTheme() {
     try {
-      var bridge = window.AstrBotPluginPage;
-      if (bridge) {
-        var ctx = bridge.getContext();
-        if (ctx && typeof ctx.isDark === "boolean") return ctx.isDark ? "dark" : "light";
-      }
+      var stored = localStorage.getItem("memori_theme");
+      if (stored) return stored;
     } catch (_) {}
     try {
       var stored = localStorage.getItem("lmem_theme");
@@ -195,19 +254,16 @@
     var current = document.documentElement.getAttribute("data-theme") || "light";
     var next = current === "light" ? "dark" : "light";
     applyTheme(next);
-    try { localStorage.setItem("lmem_theme", next); } catch (_) {}
+    try { localStorage.setItem("memori_theme", next); } catch (_) {}
     showToast(window.t(next === "dark" ? "theme.darkToast" : "theme.lightToast"));
   }
 
   function listenBridgeTheme() {
+    // 独立模式下通过 localStorage 同步主题
     try {
-      var bridge = window.AstrBotPluginPage;
-      if (!bridge || typeof bridge.onContext !== "function") return;
-      bridge.onContext(function(ctx) {
-        if (!ctx || typeof ctx.isDark !== "boolean") return;
-        var t = ctx.isDark ? "dark" : "light";
-        if (t !== (document.documentElement.getAttribute("data-theme") || "light")) {
-          applyTheme(t);
+      window.addEventListener("storage", function(e) {
+        if (e.key === "memori_theme") {
+          applyTheme(e.newValue || "light");
         }
       });
     } catch (_) {}

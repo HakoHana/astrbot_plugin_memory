@@ -61,6 +61,8 @@ function render(groups) {
             let input = '';
             if (field.type === 'bool') {
                 input = `<input type="checkbox" id="${id}" ${val ? 'checked' : ''}>`;
+            } else if (field.type === 'text') {
+                input = `<textarea id="${id}" rows="3" style="width:220px;padding:6px 10px;border:1px solid #d1d1d6;border-radius:8px;font-size:14px;outline:none;resize:vertical;font-family:inherit">${esc(val)}</textarea>`;
             } else if (field.type === 'select') {
                 let opts = field.options.map(o =>
                     `<option value="${o}" ${val === o ? 'selected' : ''}>${o}</option>`

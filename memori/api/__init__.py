@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,6 +14,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from ..core.memory_core import MemoryCore
 from .routes import router
+
+_CONFIG_FILE = "memori_config.json"
 
 
 class SimpleProvider:
@@ -45,6 +48,30 @@ class SimpleContext:
         return getattr(event, "sender_name", "")
 
 
+def _load_config(data_dir: str) -> dict:
+    """从 JSON 文件加载持久化配置"""
+    path = Path(data_dir) / _CONFIG_FILE
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[memori] 配置加载失败: {e}")
+    return {}
+
+
+def _save_config(data_dir: str, config: dict) -> None:
+    """保存配置到 JSON 文件"""
+    path = Path(data_dir) / _CONFIG_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[memori] 配置保存失败: {e}")
+
+
 def create_app(
     memory_core: MemoryCore | None = None,
     config: dict[str, Any] | None = None,
@@ -56,26 +83,39 @@ def create_app(
     Args:
         memory_core: 已初始化的 MemoryCore 实例（优先）
         config:      如果未传入 core 则创建新实例时使用
-        data_dir:    数据目录
+        data_dir:    数据目录，配置 JSON 存放在此
         **kwargs:    传递给 MemoryCore 的额外参数
     """
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # 启动：创建并初始化 MemoryCore
+        resolved_data_dir = data_dir or str(Path.cwd() / "data" / "memori")
+        app.state._data_dir = resolved_data_dir
+
+        # 从持久化加载配置
+        persisted = _load_config(resolved_data_dir)
+        merged_config = {**(config or {}), **persisted}  # persisted 优先
+
         core = getattr(app.state, "memory_core", None)
         if core is None:
             core = MemoryCore(
-                config=config or {},
+                config=merged_config,
                 llm_provider=SimpleProvider(),
                 context_provider=SimpleContext(),
-                data_dir=data_dir or str(Path.cwd() / "data" / "memori"),
+                data_dir=resolved_data_dir,
                 **kwargs,
             )
             app.state.memory_core = core
+        elif persisted:
+            core.config.update(persisted)
+            core.reload_config(core.config)
+
         if not core._initialized:
             await core.initialize()
         yield
-        # 关闭
+
+        # 关闭时保存配置
+        if hasattr(app.state, "memory_core") and app.state.memory_core:
+            _save_config(resolved_data_dir, app.state.memory_core.config)
         await core.destroy()
         app.state.memory_core = None
 
@@ -95,15 +135,13 @@ def create_app(
         allow_headers=["*"],
     )
 
-    # 如果已有 core，直接挂载
     if memory_core is not None:
         app.state.memory_core = memory_core
 
-    # 路由
+    # API 路由
     app.include_router(router, prefix="/api")
 
     # 配置页面
-    from pathlib import Path
     _ui_path = Path(__file__).parent / "webui_config.html"
 
     @app.get("/config")

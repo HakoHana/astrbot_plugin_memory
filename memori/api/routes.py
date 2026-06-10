@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..core.memory_core import MemoryCore
 from .deps import get_core
@@ -394,6 +394,8 @@ _CONFIG_META = {
         "label": "记忆注入位置", "group": "注入",
     },
     "injection_use_tag": {"type": "bool", "default": True, "label": "启用 <memory> 标签包裹", "group": "注入"},
+    "injection_template": {"type": "text", "default": "", "label": "注入自定义模板", "hint": "{{content}} = 记忆内容, {{user}} = 用户名", "group": "注入"},
+    "pre_filter_enabled": {"type": "bool", "default": False, "label": "预过滤（新用户降噪）", "group": "注入"},
     "trigger_msg_count": {"type": "int", "default": 10, "label": "整理触发消息数", "group": "整理"},
     "trigger_time_minutes": {"type": "int", "default": 360, "label": "整理触发间隔(分钟)", "group": "整理"},
     "warmup_enabled": {"type": "bool", "default": True, "label": "暖启动", "group": "整理"},
@@ -404,8 +406,9 @@ _CONFIG_META = {
     "decay_rate": {"type": "float", "default": 0.99, "label": "日衰减率", "group": "衰减"},
     "decay_enabled": {"type": "bool", "default": True, "label": "启用衰减", "group": "衰减"},
     "expired_atom_ttl_days": {"type": "int", "default": 60, "label": "过期原子保留天数", "group": "衰减"},
-    "warm_days": {"type": "int", "default": 90, "label": "归档天数阈值", "group": "归档"},
-    "cold_importance_threshold": {"type": "float", "default": 0.1, "label": "归档重要度阈值", "group": "归档"},
+    "max_summary_chars": {"type": "int", "default": 200, "label": "归档摘要最大字数", "group": "归档"},
+    "archive_enabled": {"type": "bool", "default": True, "label": "启用归档", "group": "归档"},
+    "archive_path": {"type": "string", "default": "./memory_archive", "label": "归档目录", "group": "归档"},
 }
 
 
@@ -417,7 +420,13 @@ async def get_config(core: MemoryCore = Depends(get_core)):
         group = meta["group"]
         if group not in groups:
             groups[group] = []
-        current = core.config.get(key, meta["default"])
+        # 扁平键 → 读取嵌套配置
+        if key.startswith("archive_"):
+            sub_key = key.replace("archive_", "")
+            archive_cfg = core.config.get("archive", {})
+            current = archive_cfg.get(sub_key, meta["default"])
+        else:
+            current = core.config.get(key, meta["default"])
         groups[group].append({
             "key": key,
             "value": current,
@@ -427,20 +436,40 @@ async def get_config(core: MemoryCore = Depends(get_core)):
 
 
 @router.put("/v1/config")
-async def update_config(body: dict, core: MemoryCore = Depends(get_core)):
-    """更新配置项"""
+async def update_config(body: dict, request: Request, core: MemoryCore = Depends(get_core)):
+    """更新配置项（自动保存到磁盘）"""
+    import json
+
     valid_keys = set(_CONFIG_META.keys())
     for key, value in body.items():
         if key not in valid_keys:
             continue
         meta = _CONFIG_META[key]
-        # 类型校验
         if meta["type"] == "int":
             value = int(value)
         elif meta["type"] == "float":
             value = float(value)
         elif meta["type"] == "bool":
             value = bool(value)
-        core.config[key] = value
+
+        # 扁平键 → 嵌套配置（例如 archive_enabled → archive.enabled）
+        if key.startswith("archive_"):
+            sub_key = key.replace("archive_", "")
+            if "archive" not in core.config:
+                core.config["archive"] = {}
+            core.config["archive"][sub_key] = value
+        else:
+            core.config[key] = value
     core.reload_config(core.config)
+
+    # 持久化到 JSON 文件
+    data_dir = getattr(request.app.state, "_data_dir", None)
+    if data_dir:
+        path = Path(data_dir) / "memori_config.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(core.config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     return {"ok": True, "updated": list(body.keys())}

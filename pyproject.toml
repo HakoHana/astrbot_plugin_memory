@@ -25,7 +25,3 @@ server = [
 
 [project.urls]
 Source = "https://github.com/HakoHana/memoria"
-
-# 自动发现 memoria/ 下的所有子包
-[tool.setuptools.packages.find]
-include = ["memoria*"]

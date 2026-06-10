@@ -387,6 +387,10 @@ async def trigger_decay(core: MemoryCore = Depends(get_core)):
 _CONFIG_META = {
     "bot_name": {"type": "string", "default": "Hana", "label": "Bot 名称", "group": "基础",
                  "hint": "在对话和记忆中使用的名称"},
+    "llm_provider_id": {"type": "string", "default": "", "label": "主模型 ID", "group": "基础",
+                        "hint": "用于记忆整理（写日记/提取原子）的 LLM。留空 = 使用默认"},
+    "judge_provider_id": {"type": "string", "default": "", "label": "判读模型 ID", "group": "基础",
+                          "hint": "用于判断「值不值得记」的 LLM，通常选便宜快速的模型。留空 = 与主模型相同"},
     "recall_count": {"type": "int", "default": 5, "label": "召回条数", "group": "检索",
                      "hint": "每次消息处理时最多召回多少条记忆原子"},
     "recall_max_tokens": {"type": "int", "default": 500, "label": "召回 token 上限", "group": "检索",

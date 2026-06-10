@@ -606,6 +606,12 @@ class MemoryCore:
             cm.trigger_msg_count = config.get("trigger_msg_count", cm.trigger_msg_count)
             cm.trigger_time_minutes = config.get("trigger_time_minutes", cm.trigger_time_minutes)
             cm.warmup_enabled = config.get("warmup_enabled", cm.warmup_enabled)
+        # 切换 LLM 模型
+        if self.llm_provider:
+            if "llm_provider_id" in config:
+                self.llm_provider.set_provider(config["llm_provider_id"])
+            if "judge_provider_id" in config:
+                self.llm_provider.set_judge_provider(config["judge_provider_id"])
 
     # 向后兼容 — 旧的 memory_core.on_message 接口
     async def on_message(self, event, sender_name: str = "") -> str | None:

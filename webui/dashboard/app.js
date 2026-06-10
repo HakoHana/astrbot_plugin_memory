@@ -375,24 +375,11 @@
   async function loadSettingsPage() {
     var body = document.getElementById("settings-body");
     if (!body) { alert("settings-body not found"); return; }
-    var loading = document.getElementById("settings-loading");
-    if (loading) loading.style.display = "block";
-    // 先放一个占位，确保 innerHTML 执行
-    body.innerHTML = '<p style="padding:20px;color:#666">🔄 正在加载系统配置...</p>';
-    try {
-      var resp = await fetch("/api/v1/config");
-      var data = await resp.json();
-      if (!data.ok) throw new Error(data.error || "加载失败");
-      console.log("Config groups:", Object.keys(data.groups || {}));
-      var html = buildSettingsHTML(data.groups);
-      console.log("HTML length:", html.length);
-      body.innerHTML = html + '<div style="color:#090;padding:10px">✅ 配置已加载</div>';
-      loadProvsForSettings();
-    } catch (e) {
-      console.error("Settings error:", e);
-      body.innerHTML = '<p style="color:red;padding:20px">⚠️ ' + e.message + '</p>';
-    }
-    if (loading) loading.style.display = "none";
+    // === 测试 1: 纯文本能否显示 ===
+    body.textContent = "如果能看到这行字，说明 settings-body 可以显示内容";
+    await new Promise(function(r) { setTimeout(r, 3000); });
+    // === 测试 2: innerHTML 能否显示 ===
+    body.innerHTML = '<div style="background:#fff;padding:20px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.1)"><h2 style="margin:0 0 10px;color:#06c">简易卡片</h2><p style="color:#333">如果能看到卡片，说明 CSS 没问题</p></div>';
   }
 
   function buildSettingsHTML(groups) {

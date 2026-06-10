@@ -179,7 +179,7 @@ class MemoriPlugin(Star):
 
         # 注册 Agent 工具
         try:
-            from .tools import RecallTool, MemorizeTool
+            from tools import RecallTool, MemorizeTool
             recall_tool = RecallTool()
             recall_tool.set_core(self.core)
             memorize_tool = MemorizeTool()
@@ -249,6 +249,38 @@ class MemoriPlugin(Star):
 
         if hasattr(event, 'system_prompt') and event.system_prompt and req:
             req.system_prompt = event.system_prompt
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
+    async def on_message(self, event: AstrMessageEvent):
+        """后台整理触发器 — 不阻塞消息回复"""
+        if not self.core:
+            return
+        try:
+            uid = AstrBotCtx().get_user_id(event)
+            txt = AstrBotCtx().get_conversation_text(event)
+            sender_name = self._get_sender_name(event)
+
+            if not uid or not txt or txt.startswith("/"):
+                return
+
+            # 完整对话上下文传给整理器
+            cs = self.core.conversation_store
+            full_ctx = txt
+            if cs:
+                try:
+                    sid = await cs.get_session_id(event)
+                    bot_name = self.config.get("bot_name", "Hana")
+                    full_ctx = await cs.get_recent_context(sid, limit=10, bot_name=bot_name)
+                except Exception:
+                    pass
+
+            task = asyncio.ensure_future(
+                self.core.consolidation_manager.on_message(uid, full_ctx, sender_name)
+            )
+            self.core._background_tasks.add(task)
+            task.add_done_callback(self.core._background_tasks.discard)
+        except Exception as e:
+            logger.error(f"[memori] on_message 出错: {e}")
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, response: LLMResponse = None):

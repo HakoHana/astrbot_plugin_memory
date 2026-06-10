@@ -9,8 +9,8 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api import logger
 
-from memori import MemoryCore
-from memori.core.adapters import LLMProvider, ContextProvider
+from .memori import MemoryCore
+from .memori.core.adapters import LLMProvider, ContextProvider
 
 
 # ═══════════════════════════════════════════════════════════
@@ -304,7 +304,7 @@ class MemoriPlugin(Star):
         if self.core:
             await self.core.destroy()
             try:
-                from memori.storage.base_store import BaseDbStore
+                from .memori.storage.base_store import BaseDbStore
                 BaseDbStore.close_all_sync()
             except Exception:
                 pass

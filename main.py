@@ -177,6 +177,38 @@ class MemoriPlugin(Star):
         )
         await self.core.initialize()
 
+        # 从 AstrBot 同步已配好的 LLM 提供商到 memori 配置
+        try:
+            pm = getattr(self.context, "provider_manager", None)
+            if pm and hasattr(pm, "providers_config"):
+                astrbot_providers = []
+                for pc in pm.providers_config:
+                    keys = pc.get("key", [])
+                    api_key = keys[0] if isinstance(keys, list) and keys else ""
+                    astrbot_providers.append({
+                        "name": pc.get("id", ""),
+                        "api_base": pc.get("api_base", ""),
+                        "api_key": api_key,
+                        "model": pc.get("model", "") or "",
+                    })
+                if astrbot_providers:
+                    self.core.config.setdefault("_providers", [])
+                    # 合并：AstrBot 的覆盖同名项，新增不同名项
+                    existing = {p["name"] for p in self.core.config["_providers"]}
+                    for p in astrbot_providers:
+                        if p["name"] in existing:
+                            # 更新已有
+                            for i, ep in enumerate(self.core.config["_providers"]):
+                                if ep["name"] == p["name"]:
+                                    self.core.config["_providers"][i] = p
+                                    break
+                        else:
+                            self.core.config["_providers"].append(p)
+                    self.core.reload_config(self.core.config)
+                    logger.info(f"[memori] 已同步 {len(astrbot_providers)} 个 LLM 提供商（来自 AstrBot）")
+        except Exception as e:
+            logger.warning(f"[memori] 同步 AstrBot 提供商失败: {e}")
+
         # 注册 Agent 工具
         try:
             from tools import RecallTool, MemorizeTool

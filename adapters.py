@@ -1,52 +1,12 @@
-"""抽象层 — 隔离核心逻辑和 AstrBot 运行时"""
+"""AstrBot 适配层 — 实现 memoria 定义的接口"""
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Any
+from memoria.core.adapters import LLMProvider, ContextProvider
 
-
-class LLMProvider(ABC):
-    """LLM 调用抽象"""
-
-    @abstractmethod
-    async def chat(self, system_prompt: str, user_prompt: str) -> str:
-        """调用 LLM，返回回复文本"""
-        ...
-
-
-class MemoryStore(ABC):
-    """存储抽象 — 目前由 AtomStore 实现"""
-
-    @abstractmethod
-    async def search_fts(self, query: str, user_id: str, k: int) -> list:
-        """FTS 全文搜索"""
-        ...
-
-    # 预留向量搜索接口
-    async def search_vector(self, query: str, user_id: str, k: int) -> list:
-        """向量语义搜索（预留）"""
-        raise NotImplementedError
-
-
-class ContextProvider(ABC):
-    """AstrBot 事件上下文抽象"""
-
-    @abstractmethod
-    def get_user_id(self, event) -> str:
-        """从事件中提取用户 ID"""
-        ...
-
-    @abstractmethod
-    def get_conversation_text(self, event) -> str:
-        """获取对话文本"""
-        ...
-
-
-# ── AstrBot 实现 ──
 
 class AstrBotLLMProvider(LLMProvider):
-    """封装 AstrBot 的 LLM Provider 调用，支持判读/整理分离"""
+    """封装 AstrBot 的 LLM Provider 调用"""
 
     def __init__(self, context):
         self.context = context
@@ -60,7 +20,6 @@ class AstrBotLLMProvider(LLMProvider):
         self._provider = None
 
     def set_judge_provider(self, provider_id: str | None):
-        """判读用模型（便宜的），None = 和主模型相同"""
         self._judge_provider_id = provider_id
         self._judge_provider = None
 
@@ -84,11 +43,9 @@ class AstrBotLLMProvider(LLMProvider):
         return p
 
     async def chat(self, system_prompt: str, user_prompt: str, use_judge: bool = False) -> str:
-        """调用 LLM。use_judge=True 时用便宜判读模型"""
         provider = self._get_provider(use_judge=use_judge)
         if not provider:
             raise RuntimeError("没有可用的 LLM Provider")
-
         result = await provider.text_chat(
             prompt=user_prompt,
             system_prompt=system_prompt,
@@ -106,7 +63,6 @@ class AstrBotContextProvider(ContextProvider):
     """从 AstrBot 事件中提取上下文"""
 
     def get_user_id(self, event) -> str:
-        """提取用户唯一标识"""
         try:
             if hasattr(event, "get_sender_id"):
                 sid = event.get_sender_id()
@@ -130,7 +86,6 @@ class AstrBotContextProvider(ContextProvider):
         return "default"
 
     def get_conversation_text(self, event) -> str:
-        """提取用户消息文本"""
         if hasattr(event, "get_message_str"):
             return event.get_message_str() or ""
         if hasattr(event, "message_str"):

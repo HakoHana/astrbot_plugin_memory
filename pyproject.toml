@@ -1,13 +1,13 @@
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "memoria"
 version = "0.1.0"
 description = "长期记忆内核 — 纯净的 Python 包，零框架依赖"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{name = "HakoHana"}]
 requires-python = ">=3.11"
 dependencies = [
@@ -26,5 +26,6 @@ server = [
 [project.urls]
 Source = "https://github.com/HakoHana/memoria"
 
+# 自动发现 memoria/ 下的所有子包
 [tool.setuptools.packages.find]
-include = ["memoria", "memoria.*"]
+include = ["memoria*"]

@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -18,21 +19,93 @@ from .routes import router
 _CONFIG_FILE = "memori_config.json"
 
 
-class SimpleProvider:
-    """最小 LLMProvider — 用于独立服务模式（由上层接入方替换）"""
+class BuiltinLLMProvider:
+    """memori 内置 LLM Provider — 零外部依赖，直接调用 API
+
+    从 memori 自己的配置中读取提供商信息（api_base / api_key / model）。
+    支持 OpenAI 兼容接口（OpenAI / Anthropic / vLLM / Ollama 等）。
+    """
 
     def __init__(self):
-        self._provider_id = None
-        self._judge_id = None
+        self._config_ref = None       # 指向 MemoryCore.config
+        self._provider_id = None      # 当前选中的提供商名称
+        self._judge_id = None         # 判读模型提供商名称
+
+    def bind_config(self, config: dict):
+        """绑定到 MemoryCore 的配置字典"""
+        self._config_ref = config
+
+    def set_provider(self, pid: str | None):
+        self._provider_id = pid
+
+    def set_judge_provider(self, pid: str | None):
+        self._judge_id = pid
+
+    def _get_provider_cfg(self, name: str) -> dict | None:
+        """从配置中查找指定名称的提供商"""
+        if not self._config_ref or not name:
+            return None
+        for p in self._config_ref.get("_providers", []):
+            if p.get("name") == name:
+                return p
+        return None
 
     async def chat(self, system_prompt: str, user_prompt: str) -> str:
-        raise NotImplementedError(
-            "请提供真实的 LLMProvider 实现: "
-            "app.state.memory_core.llm_provider = MyProvider()"
-        )
+        return await self._call_llm(self._provider_id, system_prompt, user_prompt)
 
-    def set_provider(self, pid: str | None): self._provider_id = pid
-    def set_judge_provider(self, pid: str | None): self._judge_id = pid
+    async def chat_with_judge(self, system_prompt: str, user_prompt: str) -> str:
+        pid = self._judge_id or self._provider_id
+        return await self._call_llm(pid, system_prompt, user_prompt)
+
+    async def _call_llm(self, provider_name: str | None, system: str, user: str) -> str:
+        cfg = self._get_provider_cfg(provider_name)
+        if not cfg:
+            raise RuntimeError(
+                f"LLM 提供商「{provider_name}」未配置。"
+                f"请在 WebUI 配置页 → 模型提供商 中添加。"
+            )
+
+        api_base = cfg.get("api_base", "").rstrip("/")
+        api_key = cfg.get("api_key", "")
+        model = cfg.get("model", "")
+
+        if not api_base or not api_key:
+            raise RuntimeError(f"提供商「{provider_name}」缺少 API 地址或 Key")
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model or "gpt-4o",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": 2048,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    f"{api_base}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data["choices"][0]["message"]["content"] or ""
+        except httpx.TimeoutException:
+            raise RuntimeError(f"LLM 调用超时（{provider_name}）")
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.text[:200]
+            except Exception:
+                pass
+            raise RuntimeError(f"LLM API 错误 ({provider_name}): {e.response.status_code} {detail}")
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(f"LLM 返回格式异常 ({provider_name}): {e}")
 
 
 class SimpleContext:
@@ -84,7 +157,6 @@ def create_app(
         memory_core: 已初始化的 MemoryCore 实例（优先）
         config:      如果未传入 core 则创建新实例时使用
         data_dir:    数据目录，配置 JSON 存放在此
-        **kwargs:    传递给 MemoryCore 的额外参数
     """
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -93,13 +165,17 @@ def create_app(
 
         # 从持久化加载配置
         persisted = _load_config(resolved_data_dir)
-        merged_config = {**(config or {}), **persisted}  # persisted 优先
+        merged_config = {**(config or {}), **persisted}
 
         core = getattr(app.state, "memory_core", None)
         if core is None:
+            # 创建内置 LLM Provider 并绑定配置
+            llm = BuiltinLLMProvider()
+            llm.bind_config(merged_config)
+
             core = MemoryCore(
                 config=merged_config,
-                llm_provider=SimpleProvider(),
+                llm_provider=llm,
                 context_provider=SimpleContext(),
                 data_dir=resolved_data_dir,
                 **kwargs,
@@ -111,6 +187,9 @@ def create_app(
 
         if not core._initialized:
             await core.initialize()
+            # 初始化后把配置里的模型选择推给 provider
+            core.reload_config(core.config)
+
         yield
 
         # 关闭时保存配置
@@ -120,13 +199,12 @@ def create_app(
         app.state.memory_core = None
 
     app = FastAPI(
-        title="Memoria Memory API",
+        title="Memori Memory API",
         version="0.1.0",
         description="长期记忆内核 RESTful API — 日记/原子/图谱/画像",
         lifespan=lifespan,
     )
 
-    # CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=kwargs.get("cors_origins", ["*"]),
@@ -138,17 +216,14 @@ def create_app(
     if memory_core is not None:
         app.state.memory_core = memory_core
 
-    # API 路由
     app.include_router(router, prefix="/api")
 
-    # 配置页面
     _ui_path = Path(__file__).parent / "webui_config.html"
 
     @app.get("/config")
     async def config_page():
         return HTMLResponse(content=_ui_path.read_text(encoding="utf-8"))
 
-    # 健康检查
     @app.get("/health")
     async def health():
         core = getattr(app.state, "memory_core", None)
@@ -157,7 +232,6 @@ def create_app(
             "version": "0.1.0",
         }
 
-    # 全局错误处理
     @app.exception_handler(Exception)
     async def global_exception(request: Request, exc: Exception):
         return JSONResponse(

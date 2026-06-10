@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.memory_core import MemoryCore
@@ -219,37 +219,47 @@ def create_app(
 
     app.include_router(router, prefix="/api")
 
-    # WebUI 静态文件（JS/CSS 用 StaticFiles，HTML 手动注入配置数据）
+    # WebUI 静态文件
     _webui_path = Path(__file__).parent.parent.parent / "webui"
     if _webui_path.exists():
         from fastapi.responses import FileResponse
+        import mimetypes
 
-        @app.get("/webui/dashboard/index.html")
-        async def dashboard_page(core: MemoryCore = Depends(get_core)):
-            import json
-            from .routes import _CONFIG_META
-            # 构建配置数据
-            groups = {}
-            for key, meta in _CONFIG_META.items():
-                group = meta["group"]
-                if group not in groups:
-                    groups[group] = []
-                if key.startswith("archive_"):
-                    sub_key = key.replace("archive_", "")
-                    archive_cfg = core.config.get("archive", {})
-                    current = archive_cfg.get(sub_key, meta["default"])
-                else:
-                    current = core.config.get(key, meta["default"])
-                groups[group].append({"key": key, "value": current, **meta})
-            config_json = json.dumps({"groups": groups}, ensure_ascii=False)
+        @app.get("/webui/{rest:path}")
+        async def webui_files(rest: str, request: Request):
+            file_path = _webui_path / rest
+            # 404 处理
+            if not file_path.exists() or not file_path.is_file():
+                return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
-            html = (_webui_path / "dashboard" / "index.html").read_text(encoding="utf-8")
-            # 在 </head> 前注入配置数据
-            script = f'<script>window.__MEMORI_CONFIG__ = {config_json};</script>'
-            html = html.replace("</head>", script + "</head>")
-            return HTMLResponse(content=html)
+            # index.html → 注入配置数据
+            if rest.endswith("dashboard/index.html"):
+                import json
+                from .routes import _CONFIG_META
+                core = getattr(request.app.state, "memory_core", None)
+                if not core:
+                    return FileResponse(file_path, media_type="text/html")
+                groups = {}
+                for key, meta in _CONFIG_META.items():
+                    group = meta["group"]
+                    if group not in groups:
+                        groups[group] = []
+                    if key.startswith("archive_"):
+                        sub_key = key.replace("archive_", "")
+                        archive_cfg = core.config.get("archive", {})
+                        current = archive_cfg.get(sub_key, meta["default"])
+                    else:
+                        current = core.config.get(key, meta["default"])
+                    groups[group].append({"key": key, "value": current, **meta})
+                config_json = json.dumps({"groups": groups}, ensure_ascii=False)
+                html = file_path.read_text(encoding="utf-8")
+                inject = f'<script>window.__MEMORI_CONFIG__ = {config_json};</script>'
+                html = html.replace("</head>", inject + "</head>")
+                return HTMLResponse(content=html)
 
-        app.mount("/webui", StaticFiles(directory=str(_webui_path)), name="webui")
+            # 其他文件原样返回
+            media_type, _ = mimetypes.guess_type(str(file_path))
+            return FileResponse(file_path, media_type=media_type or "application/octet-stream")
 
     _ui_path = Path(__file__).parent / "webui_config.html"
 

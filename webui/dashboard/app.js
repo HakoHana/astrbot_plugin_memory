@@ -377,6 +377,8 @@
     if (!body) { alert("settings-body not found"); return; }
     var loading = document.getElementById("settings-loading");
     if (loading) loading.style.display = "block";
+    // 先放一个占位，确保 innerHTML 执行
+    body.innerHTML = '<p style="padding:20px;color:#666">🔄 正在加载系统配置...</p>';
     try {
       var resp = await fetch("/api/v1/config");
       var data = await resp.json();
@@ -384,7 +386,7 @@
       console.log("Config groups:", Object.keys(data.groups || {}));
       var html = buildSettingsHTML(data.groups);
       console.log("HTML length:", html.length);
-      body.innerHTML = html;
+      body.innerHTML = html + '<div style="color:#090;padding:10px">✅ 配置已加载</div>';
       loadProvsForSettings();
     } catch (e) {
       console.error("Settings error:", e);

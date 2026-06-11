@@ -102,6 +102,7 @@ class MemoryAtom:
     diary_ref: str | None = None
     diary_snippet: str = ""          # 日记原文片段（溯源用，不参与检索/注入）
     diary_id: int = 0                  # 关联的日记条目 ID（用于精确关联）
+    embedding: list[float] | None = None  # 向量（由 EmbeddingProvider 计算，BLOB 存储）
     metadata: dict[str, Any] = field(default_factory=dict)
     atom_id: int = 0                   # 数据库 ID，插入后填充
 

@@ -445,6 +445,8 @@ _CONFIG_META = {
                         "hint": "用于记忆整理（写日记/提取原子）的 LLM 配置名。在下方「模型提供商」中配置"},
     "judge_provider_id": {"type": "string", "default": "", "label": "判读模型", "group": "基础",
                           "hint": "用于判断值不值得记的 LLM，需已在模型提供商中配置。留空 = 与主模型相同"},
+    "embed_provider_id": {"type": "string", "default": "", "label": "嵌入模型", "group": "基础",
+                          "hint": "用于向量检索的嵌入模型。需已在模型提供商中配置。留空 = 不启用向量检索"},
     "recall_count": {"type": "int", "default": 5, "label": "召回条数", "group": "检索",
                      "hint": "每次消息处理时最多召回多少条记忆原子"},
     "recall_max_tokens": {"type": "int", "default": 500, "label": "召回 token 上限", "group": "检索",

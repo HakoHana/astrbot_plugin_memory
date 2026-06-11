@@ -265,6 +265,86 @@ class AtomStore(BaseDbStore, MemoryStore):
         scored.sort(key=lambda x: -x[0])
         return [sa[1] for sa in scored[:k]]
 
+    # ═══════════════════════════════════════════════════
+    #  向量搜索
+    # ═══════════════════════════════════════════════════
+
+    async def update_embedding(self, atom_id: int, embedding: list[float], model_name: str):
+        """写入单条原子的 embedding 向量
+
+        Args:
+            atom_id: 原子 ID
+            embedding: 浮点数向量
+            model_name: 嵌入模型名称（用于溯源）
+        """
+        import json
+        blob = json.dumps(embedding).encode("utf-8")
+        await self.execute(
+            "UPDATE memory_atoms SET embedding=?, embedding_model=? WHERE id=?",
+            (blob, model_name, atom_id),
+        )
+
+    async def search_vector(
+        self,
+        query_embed: list[float],
+        user_id: str,
+        k: int = 5,
+        model_name: str = "",
+    ) -> list[MemoryAtom]:
+        """余弦相似度向量搜索
+
+        Python 级计算（SQLite 无原生向量索引），适合数千条级别数据。
+        加载用户活跃原子 → 逐条余弦相似度 → 排序取 top-k。
+
+        Args:
+            query_embed: 查询向量
+            user_id: 用户 ID
+            k: 返回 top N
+            model_name: 过滤指定模型，空字符串则不限
+
+        Returns:
+            按相似度降序排列的 MemoryAtom 列表
+        """
+        if not query_embed:
+            return []
+
+        # 加载有 embedding 的活跃原子（按重要度预排序，取较多候选）
+        model_filter = "AND embedding_model=?" if model_name else ""
+        params: list = [user_id]
+        if model_name:
+            params.append(model_name)
+
+        rows = await self.fetch(
+            f"SELECT * FROM memory_atoms WHERE user_id=? AND status='active' "
+            f"AND embedding IS NOT NULL {model_filter} "
+            f"ORDER BY importance DESC LIMIT ?",
+            (*params, k * 20),
+        )
+
+        if not rows:
+            return []
+
+        # 余弦相似度
+        q_norm = sum(x * x for x in query_embed) ** 0.5
+        if q_norm < 1e-10:
+            return []
+
+        scored: list[tuple[float, list]] = []
+        for row in rows:
+            atom = self._row_to_atom(row)
+            stored = atom.embedding
+            if not stored or len(stored) != len(query_embed):
+                continue
+            dot = sum(a * b for a, b in zip(query_embed, stored))
+            s_norm = sum(x * x for x in stored) ** 0.5
+            if s_norm < 1e-10:
+                continue
+            sim = dot / (q_norm * s_norm)
+            scored.append((sim, atom))
+
+        scored.sort(key=lambda x: -x[0])
+        return [sa[1] for sa in scored[:k]]
+
     async def get_by_user(self, user_id: str, status: str | None = "active") -> list[MemoryAtom]:
         """获取用户所有原子"""
         if status:
@@ -684,6 +764,7 @@ class AtomStore(BaseDbStore, MemoryStore):
             decay_type=self._parse_decay_type(d["decay_type"]),
             diary_snippet=d["diary_snippet"] or "",
             metadata=self._safe_json_loads(d.get("metadata")),
+            embedding=self._deserialize_embedding(d.get("embedding")),
         )
 
     @staticmethod
@@ -736,3 +817,17 @@ class AtomStore(BaseDbStore, MemoryStore):
             return json.loads(raw)
         except Exception:
             return {}
+
+    @staticmethod
+    def _deserialize_embedding(raw) -> list[float] | None:
+        """从 BLOB 反序列化 embedding 向量"""
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            if isinstance(raw, str):
+                return json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            pass
+        return None

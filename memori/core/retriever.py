@@ -14,7 +14,8 @@ from ..storage.diary_store import DiaryStore
 from ..storage.persona_store import PersonaStore
 from ..storage.graph_store import GraphStore
 from .logger import logger
-from ..retrieval import DualRouteRetriever, BM25Retriever, GraphEntityRetriever
+from ..retrieval import MultiRouteRetriever, BM25Retriever, GraphEntityRetriever, VectorRetriever
+from ..core.adapters import EmbeddingProvider
 from .interfaces import IRetriever
 
 
@@ -40,6 +41,7 @@ class Retriever(IRetriever):
         hot_cache=None,
         conversation_store=None,
         graph_store: GraphStore | None = None,
+        embed_provider: EmbeddingProvider | None = None,
     ):
         self.atom_store = atom_store
         self.persona_store = persona_store
@@ -49,14 +51,21 @@ class Retriever(IRetriever):
         self.conversation_store = conversation_store
         self.recall_count = self.config.get("recall_count", 5)
         self.recall_max_tokens = self.config.get("recall_max_tokens", 500)
+        self.embed_provider = embed_provider
 
-        # 双路检索引擎（图路需要 graph_store）
-        self.dual_route: DualRouteRetriever | None = None
+        # 多路检索引擎（BM25 图路 + 可选向量路）
+        self.multi_route: MultiRouteRetriever | None = None
         if graph_store:
-            self.dual_route = DualRouteRetriever(
+            vector_retriever = (
+                VectorRetriever(atom_store, embed_provider) if embed_provider else None
+            )
+            self.multi_route = MultiRouteRetriever(
                 bm25_retriever=BM25Retriever(atom_store),
                 graph_retriever=GraphEntityRetriever(graph_store, atom_store),
+                vector_retriever=vector_retriever,
             )
+        # 向后兼容
+        self.dual_route = self.multi_route
 
     # ── RRF 融合 ──
     RRF_K = 60

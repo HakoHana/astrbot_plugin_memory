@@ -123,6 +123,47 @@ class ContextProvider(ABC):
         return ""
 
 
+class EmbeddingProvider(ABC):
+    """嵌入模型抽象 — 将文本转为向量（可选，默认不启用）
+
+    接入方可实现此接口接入任何嵌入服务（本地 sentence-transformers、OpenAI API 等）。
+    传入 MemoryCoreOptions.embed_provider 即可启用向量检索。
+    """
+
+    @abstractmethod
+    async def embed(self, text: str) -> list[float]:
+        """单条文本嵌入
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            浮点数向量
+        """
+        ...
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量文本嵌入（默认逐条调用，子类可重写为并行）
+
+        Args:
+            texts: 输入文本列表
+
+        Returns:
+            向量列表，顺序与输入一致
+        """
+        return [await self.embed(t) for t in texts]
+
+    @property
+    @abstractmethod
+    def dimension(self) -> int:
+        """向量维度"""
+        ...
+
+    def set_provider(self, provider_id: str | None) -> None:
+        """切换后端（可选实现，默认 no-op）"""
+        pass
+
+
 class MemoryStore(ABC):
     """存储抽象 — 搜索接口，供检索系统扩展
 

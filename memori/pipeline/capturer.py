@@ -17,7 +17,7 @@ from ..models.memory_atom import (
     CaptureJudgeResult,
     CaptureResult,
 )
-from ..core.adapters import LLMProvider
+from ..core.adapters import LLMProvider, EmbeddingProvider
 from ..core.interfaces import ICapturer
 from .capture_step import (
     CaptureStep, CaptureContext,
@@ -42,12 +42,14 @@ class Capturer(ICapturer):
         prompts_dir: str,
         config: dict[str, Any] | None = None,
         on_atoms_created: callable = None,
+        embed_provider: EmbeddingProvider | None = None,
     ):
         self.llm = llm_provider
         self._store = store
         self.config = config or {}
         self.max_diary_tokens = self.config.get("max_diary_tokens", 500)
         self.on_atoms_created = on_atoms_created
+        self.embed_provider = embed_provider
 
         # 构建 Capture 流水线步骤（策略链）
         # 新增步骤只需新建 CaptureStep 子类并注册到此列表
@@ -188,6 +190,19 @@ class Capturer(ICapturer):
             except Exception:
                 pass
 
+        # 4. 异步计算 embedding（fire-and-forget）
+        #    需要原子已落库且有 ID
+        if self.embed_provider and atoms:
+            try:
+                task = asyncio.ensure_future(
+                    self._compute_embeddings(atoms)
+                )
+                task.add_done_callback(
+                    lambda t: logger.warning(f"[Capturer] Embedding 异常: {t.exception()}") if t.exception() else None
+                )
+            except Exception:
+                pass
+
         if op_id:
             await self._store.complete_op(op_id)
 
@@ -283,6 +298,31 @@ class Capturer(ICapturer):
         except Exception:
             pass
         return False, None
+
+    async def _compute_embeddings(self, atoms: list[MemoryAtom]):
+        """异步计算并持久化原子 embedding
+
+        Capture 流程的异步后处理步骤，不阻塞主流程。
+        仅在 embed_provider 配置时自动执行。
+        """
+        if not self.embed_provider or not atoms:
+            return
+        try:
+            texts = [a.content for a in atoms if a.content]
+            if not texts:
+                return
+            embeddings = await self.embed_provider.embed_batch(texts)
+            model_name = type(self.embed_provider).__name__
+            for atom, emb in zip(atoms, embeddings):
+                if atom.atom_id > 0:
+                    atom.embedding = emb
+                    await self._store.update_embedding(atom.atom_id, emb, model_name)
+            logger.info(
+                f"[Capturer] 已计算 {len(embeddings)} 条原子 embedding "
+                f"(model={model_name}, dim={len(embeddings[0]) if embeddings else 0})"
+            )
+        except Exception as e:
+            logger.warning(f"[Capturer] 计算 embedding 失败: {e}")
 
     async def _reinforce_if_duplicate(
         self, atom, user_id: str, judge_importance: float = 0.5, diary_date: str = ""

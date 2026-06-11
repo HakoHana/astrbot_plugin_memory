@@ -21,7 +21,7 @@ from ..storage.graph_store import GraphStore
 from ..storage.index_validator import IndexValidator
 from ..storage.db_migration import DBMigration
 from ..storage.base_store import BaseDbStore
-from .adapters import LLMProvider, ContextProvider
+from .adapters import LLMProvider, ContextProvider, EmbeddingProvider
 
 # 接口（供类型标注用）
 from .interfaces import (
@@ -62,6 +62,8 @@ class MemoryCoreOptions:
     graph_store: GraphStore | None = None
     conversation_store: ConversationStore | None = None
     write_op_log: WriteOpLog | None = None
+    # 嵌入模型（可选，默认不启用向量检索）
+    embed_provider: EmbeddingProvider | None = None
 
 
 class MemoryCore:
@@ -115,6 +117,7 @@ class MemoryCore:
         # 子模块（标注为接口类型，实现由工厂类注入）
         self.llm_provider: LLMProvider | None = None
         self.context_provider: ContextProvider | None = None
+        self.embed_provider: EmbeddingProvider | None = opts.embed_provider
         self.atom_store: AtomStore | None = None
         self.diary_store: DiaryStore | None = None
         self.persona_store: PersonaStore | None = None
@@ -274,6 +277,7 @@ class MemoryCore:
             prompts_dir=prompts_dir,
             config=self.config,
             on_atoms_created=self.graph_engine.index_diary,
+            embed_provider=self.embed_provider,
         )
         self.persona_engine = PersonaEngine(
             llm_provider=self.llm_provider,
@@ -291,6 +295,7 @@ class MemoryCore:
             hot_cache=self.hot_cache,
             conversation_store=self.conversation_store,
             graph_store=self.graph_store,
+            embed_provider=self.embed_provider,
         )
         self.injector = MemoryInjector(self.config)
 
@@ -753,6 +758,9 @@ class MemoryCore:
                 self.llm_provider.set_provider(config["llm_provider_id"])
             if "judge_provider_id" in config:
                 self.llm_provider.set_judge_provider(config["judge_provider_id"])
+        # 切换嵌入模型
+        if self.embed_provider and "embed_provider_id" in config:
+            self.embed_provider.set_provider(config["embed_provider_id"])
 
     # 向后兼容 — 旧的 memory_core.on_message 接口
     async def on_message(self, event, sender_name: str = "") -> str | None:

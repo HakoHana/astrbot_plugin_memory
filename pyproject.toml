@@ -19,6 +19,9 @@ dependencies = [
 keywords = ["memory", "llm", "agent", "knowledge-graph", "sqlite"]
 
 [project.optional-dependencies]
+embedding = [
+    "sentence-transformers>=3.0.0",
+]
 server = [
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",

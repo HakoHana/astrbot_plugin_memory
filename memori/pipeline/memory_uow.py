@@ -107,6 +107,12 @@ class MemoryUnitOfWork:
             "DELETE FROM memory_atoms_fts WHERE atom_id=?", (atom_id,)
         )
 
+    # ── 向量 embedding ──
+
+    async def update_embedding(self, atom_id: int, embedding: list[float], model_name: str):
+        """写入单条原子的 embedding 向量"""
+        await self._atom.update_embedding(atom_id, embedding, model_name)
+
     # ── 事实表 ──
 
     async def ensure_fact(

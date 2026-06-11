@@ -104,7 +104,7 @@ class MemoriPlugin(Star):
         api_port = int(self.config.get("api_port", 8765))
         api_host = self.config.get("api_host", "127.0.0.1")
         try:
-            from ..memori.api import create_app
+            from .memori.api import create_app
             import uvicorn
 
             app = create_app(memory_core=self.core)

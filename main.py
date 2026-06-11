@@ -34,6 +34,7 @@ class MemoriPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self.core: MemoryCore | None = None
+        self._http_server = None
 
     async def initialize(self):
         data_dir = str(StarTools.get_data_dir())
@@ -94,6 +95,30 @@ class MemoriPlugin(Star):
             logger.warning(f"[memori] 注册 Agent Tools 失败: {e}")
 
         logger.info("[memori] 内核就绪")
+
+        # 启动 HTTP 服务（后台，提供 Dashboard + API）
+        await self._start_http_server()
+
+    async def _start_http_server(self):
+        """启动 FastAPI 后台服务，提供 Dashboard 和 REST API"""
+        api_port = int(self.config.get("api_port", 8765))
+        api_host = self.config.get("api_host", "127.0.0.1")
+        try:
+            from ..memori.api import create_app
+            import uvicorn
+
+            app = create_app(memory_core=self.core)
+            cfg = uvicorn.Config(
+                app=app,
+                host=api_host,
+                port=api_port,
+                log_level="warning",
+            )
+            server = uvicorn.Server(cfg)
+            self._http_server = asyncio.ensure_future(server.serve())
+            logger.info(f"[memori] HTTP 服务已启动: http://{api_host}:{api_port}")
+        except Exception as e:
+            logger.warning(f"[memori] HTTP 服务启动失败: {e}")
 
     def _get_sender_name(self, event) -> str:
         try:
@@ -215,13 +240,15 @@ class MemoriPlugin(Star):
             f" 记忆系统 Dashboard\n\n"
             f"面板地址: http://localhost:{port}/\n"
             f"设置页:   http://localhost:{port}/settings\n"
-            f"配置页:   http://localhost:{port}/webui/settings/\n\n"
-            f"确保 memori HTTP 服务正在运行（python -m memori --port {port}）"
+            f"API 文档: http://localhost:{port}/docs\n"
         )
 
     # ── 卸载清理 ──
 
     async def on_unload(self):
+        # 停止 HTTP 服务
+        if hasattr(self, '_http_server') and self._http_server:
+            self._http_server.cancel()
         if self.core:
             await self.core.destroy()
             try:

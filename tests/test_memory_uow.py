@@ -95,9 +95,17 @@ class TestMemoryUnitOfWorkAtomWrite:
         atom.fetchone = AsyncMock(side_effect=[
             (5,),  # fetch_atom_diary 返回 diary_id=5
         ])
+        atom.get_by_id = AsyncMock(return_value=MagicMock(
+            diary_id=7, diary_date="2026-06-11",
+            user_id="user1",
+        ))
         diary = MagicMock()
         diary.append = AsyncMock()
         diary.update_metadata = AsyncMock()
+        diary.update_metadata_by_id = AsyncMock()
+        diary.fetchone = AsyncMock(side_effect=[
+            (0.3,),   # reinforce_atom 读日记 importance（< 0.9，应触发回写）
+        ])
         log = MagicMock()
         return MemoryUnitOfWork(diary_store=diary, atom_store=atom, write_op_log=log)
 
@@ -113,10 +121,13 @@ class TestMemoryUnitOfWorkAtomWrite:
         update_call = uow._atom.execute.await_args_list[0]
         assert "UPDATE memory_atoms" in update_call[0][0]
         assert update_call[0][1] == (0.9, 0.95, 99999.0, 1)
-        # 验证 diary_id 回写
-        uow._atom.fetchone.assert_awaited_once()
-        update_diary = uow._atom.execute.await_args_list[1]
-        assert "UPDATE diary_entries" in update_diary[0][0]
+        # 验证 get_by_id 被调用（用于获取 diary_id 精确回写）
+        uow._atom.get_by_id.assert_awaited_once_with(1)
+        # 验证回写日记走精确 ID 路径（update_metadata_by_id，不再跨库硬写 SQL）
+        uow._diary.fetchone.assert_awaited_once()
+        uow._diary.update_metadata_by_id.assert_awaited_once_with(
+            7, importance=0.9,
+        )
 
     async def test_delete_forgotten_atom(self, uow):
         await uow.delete_forgotten_atom(atom_id=1)

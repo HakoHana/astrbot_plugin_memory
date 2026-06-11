@@ -335,3 +335,8 @@ class IHotMessageCache(ABC):
     def clear(self, user_id: str | None = None):
         """清空缓存"""
         ...
+
+    @abstractmethod
+    async def flush_to_db(self, conversation_store) -> int:
+        """将未刷写的消息批量持久化到 conversations.db"""
+        ...

@@ -41,9 +41,18 @@ class MemoryUnitOfWork:
         """追加一篇日记，返回 diary_id"""
         return await self._diary.append(user_id, date, content)
 
-    async def update_diary_importance(self, user_id: str, date: str, importance: float):
-        """更新日记重要度"""
-        await self._diary.update_metadata(user_id, date, importance=importance)
+    async def update_diary_importance(
+        self, user_id: str, date: str, importance: float, diary_id: int = 0,
+    ):
+        """更新日记重要度
+
+        优先按 diary_id 精确匹配，否则回退到 (user_id, date) 最新条目。
+        保持 (user_id, date, importance) 签名向后兼容。
+        """
+        if diary_id > 0:
+            await self._diary.update_metadata_by_id(diary_id, importance=importance)
+        else:
+            await self._diary.update_metadata(user_id, date, importance=importance)
 
     # ── 原子查询（供去重使用）──
 
@@ -92,13 +101,27 @@ class MemoryUnitOfWork:
             "access_count=access_count+1, expires_at=? WHERE id=?",
             (importance, confidence, expires_at, atom_id),
         )
-        # 回写源日记重要度
-        diary_id = await self.fetch_atom_diary(atom_id)
-        if diary_id and diary_id > 0:
-            await self._atom.execute(
-                "UPDATE diary_entries SET importance = MAX(importance, ?) WHERE id = ?",
-                (importance, diary_id),
-            )
+        # 回写源日记重要度 — 优先用 diary_id 精确匹配，一天多份时不会误改
+        atom = await self._atom.get_by_id(atom_id)
+        if atom:
+            if atom.diary_id > 0:
+                row = await self._diary.fetchone(
+                    "SELECT importance FROM diary_entries WHERE id=?",
+                    (atom.diary_id,),
+                )
+                if row and (row[0] is None or importance > row[0]):
+                    await self._diary.update_metadata_by_id(
+                        atom.diary_id, importance=importance,
+                    )
+            elif atom.diary_date:
+                row = await self._diary.fetchone(
+                    "SELECT importance FROM diary_entries WHERE user_id=? AND date=? ORDER BY id DESC LIMIT 1",
+                    (atom.user_id, atom.diary_date),
+                )
+                if row and (row[0] is None or importance > row[0]):
+                    await self._diary.update_metadata(
+                        atom.user_id, atom.diary_date, importance=importance,
+                    )
 
     async def delete_forgotten_atom(self, atom_id: int):
         """彻底删除已遗忘的原子（FTS 同步清理）"""

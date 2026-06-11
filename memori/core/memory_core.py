@@ -154,22 +154,33 @@ class MemoryCore:
         if not self.llm_provider or not self.context_provider:
             raise RuntimeError("必须提供 llm_provider 和 context_provider")
 
-        # 2. 数据库迁移
-        try:
-            migration = DBMigration(db_path)
-            await migration.initialize()
-            await migration.migrate()
-            logger.info("[Memoria] 数据库迁移完成")
-        except Exception as e:
-            logger.warning(f"[Memoria] 数据库迁移失败（不影响启动）: {e}")
+        # 2. 每类数据库独立文件 + 独立 schema 版本
+        diaries_db = str(self.data_dir / "diaries.db")
+        conversations_db = str(self.data_dir / "conversations.db")
+        graph_db = str(self.data_dir / "graph.db")
+        state_db = str(self.data_dir / "state.db")
+        for path, scope in [
+            (db_path, "memory"),
+            (diaries_db, "diaries"),
+            (conversations_db, "conversations"),
+            (graph_db, "graph"),
+            (state_db, "state"),
+        ]:
+            try:
+                migration = DBMigration(path, scope=scope)
+                await migration.initialize()
+                await migration.migrate()
+            except Exception as e:
+                logger.warning(f"[Memoria] {scope} 数据库迁移失败: {e}")
+        logger.info("[Memoria] 数据库迁移完成")
 
-        # 3. 存储层
+        # 3. 存储层 — 每个 Store 使用独立的数据库文件
         self.atom_store = inj["atom_store"] or AtomStore(db_path)
-        self.diary_store = inj["diary_store"] or DiaryStore(db_path)
+        self.diary_store = inj["diary_store"] or DiaryStore(diaries_db)
         self.persona_store = inj["persona_store"] or PersonaStore(str(self.data_dir))
-        self.state_store = inj["state_store"] or StateStore(db_path)
-        self.graph_store = inj["graph_store"] or GraphStore(db_path)
-        self.conversation_store = inj["conversation_store"] or ConversationStore(db_path)
+        self.state_store = inj["state_store"] or StateStore(state_db)
+        self.graph_store = inj["graph_store"] or GraphStore(graph_db)
+        self.conversation_store = inj["conversation_store"] or ConversationStore(conversations_db)
         self.write_op_log = inj["write_op_log"] or WriteOpLog(db_path)
 
         # 并行初始化存储层
@@ -201,14 +212,11 @@ class MemoryCore:
             except Exception as e:
                 logger.warning(f"[Memoria] 初始化 bot 身份失败: {e}")
 
-        # 兼容旧数据库列
-        if self.diary_store:
-            try:
-                await self.diary_store.execute(
-                    "ALTER TABLE diary_entries ADD COLUMN archived INTEGER DEFAULT 0"
-                )
-            except Exception:
-                pass
+        # 一次性的旧数据迁移：从旧单库 memory.db 分拆到各独立数据库
+        try:
+            await self._maybe_copy_legacy_data(db_path)
+        except Exception as e:
+            logger.warning(f"[Memoria] 旧数据迁移异常: {e}")
 
         # 归档模块
         if self.diary_store and self.config.get("archive", {}).get("enabled", True):
@@ -260,8 +268,13 @@ class MemoryCore:
             co_task = asyncio.ensure_future(self._cooccur_loop())
             self._background_tasks.add(co_task)
             co_task.add_done_callback(self._background_tasks.discard)
+
+            # HotCache → DB 定时刷写（每小时一次）
+            flush_task = asyncio.ensure_future(self._hotcache_flush_loop())
+            self._background_tasks.add(flush_task)
+            flush_task.add_done_callback(self._background_tasks.discard)
         except Exception as e:
-            logger.warning(f"[Memoria] 图谱后台任务注册失败: {e}")
+            logger.warning(f"[Memoria] 后台任务注册失败: {e}")
 
         # 5a. 存储门面（将 3 个 store 合并为一个 MemoryUnitOfWork）
         self._memory_uow = MemoryUnitOfWork(
@@ -344,6 +357,31 @@ class MemoryCore:
                     if name != "summary" and not r.get("passed", False):
                         for issue in r.get("issues", []):
                             logger.warning(f"[Memoria] 索引检查: {issue}")
+
+            # 孤立原子检查（分库后需跨 atom_store + diary_store）
+            if self.atom_store and self.diary_store:
+                try:
+                    orphan_rows = await self.atom_store.fetch(
+                        "SELECT DISTINCT diary_date FROM memory_atoms "
+                        "WHERE status='active' AND diary_date != ''"
+                    )
+                    orphan_count = 0
+                    for (date_str,) in orphan_rows:
+                        row = await self.diary_store.fetchone(
+                            "SELECT 1 FROM diary_entries WHERE date=? "
+                            "AND user_id IN ("
+                            "  SELECT user_id FROM memory_atoms WHERE diary_date=? LIMIT 1"
+                            ")",
+                            (date_str, date_str),
+                        )
+                        if not row:
+                            orphan_count += 1
+                    if orphan_count > 0:
+                        logger.warning(
+                            f"[Memoria] 孤立原子检查: {orphan_count} 条日记日期无对应日记"
+                        )
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning(f"[Memoria] 索引检查失败: {e}")
 
@@ -375,21 +413,33 @@ class MemoryCore:
                 await asyncio.sleep(3600)
 
     async def _cleanup_orphan_atoms(self) -> int:
-        if not self.atom_store:
+        if not self.atom_store or not self.diary_store:
             return 0
-        cursor = await self.atom_store.execute("""
-            UPDATE memory_atoms SET status='dormant'
-            WHERE status='active' AND importance < 0.2 AND (
-                diary_id = 0 OR
-                (diary_id > 0 AND NOT EXISTS (
-                    SELECT 1 FROM diary_entries de WHERE de.id = diary_id
-                ))
+        rows = await self.atom_store.fetch(
+            "SELECT DISTINCT diary_id FROM memory_atoms "
+            "WHERE status='active' AND importance < 0.2 AND diary_id > 0"
+        )
+        if not rows:
+            return 0
+        orphan_ids = []
+        for (did,) in rows:
+            row = await self.diary_store.fetchone(
+                "SELECT 1 FROM diary_entries WHERE id=?", (did,)
             )
-        """)
+            if not row:
+                orphan_ids.append(did)
+        if not orphan_ids:
+            return 0
+        placeholders = ",".join("?" for _ in orphan_ids)
+        cursor = await self.atom_store.execute(f"""
+            UPDATE memory_atoms SET status='dormant'
+            WHERE status='active' AND importance < 0.2 AND diary_id IN ({placeholders})
+        """, orphan_ids)
         count = cursor.rowcount if cursor else 0
         if count > 0:
             await self.atom_store.execute(
-                "DELETE FROM memory_atoms_fts WHERE atom_id NOT IN (SELECT id FROM memory_atoms WHERE status IN ('active','dormant'))"
+                "DELETE FROM memory_atoms_fts WHERE atom_id NOT IN "
+                "(SELECT id FROM memory_atoms WHERE status IN ('active','dormant'))"
             )
         return count
 
@@ -410,6 +460,116 @@ class MemoryCore:
             logger.info(f"[Memoria] 清理了 {count} 条过期原子 (>{ttl_days:.0f}天)")
         return count
 
+    async def _maybe_copy_legacy_data(self, old_db: str):
+        """一次性的旧数据迁移：从旧单库 memory.db 分拆到各独立数据库
+
+        启动时自动检测 + 执行，完成后不再重复。
+        数据留在旧库不动（安全保留），后续完全由新库提供服务。
+        """
+        if not Path(old_db).exists():
+            return
+
+        import aiosqlite
+
+        # 检查旧库是否有需要迁移的表
+        async with aiosqlite.connect(old_db) as src:
+            for table, dest_store, dest_path, dest_cols in [
+                ("diary_entries", self.diary_store,
+                 str(self.data_dir / "diaries.db"),
+                 ["id", "user_id", "date", "content", "topics", "sentiment",
+                  "importance", "atom_count", "created_at", "updated_at", "status", "archived"]),
+                ("sessions", self.conversation_store,
+                 str(self.data_dir / "conversations.db"),
+                 None),
+                ("messages", self.conversation_store,
+                 str(self.data_dir / "conversations.db"),
+                 None),
+                ("graph_nodes", self.graph_store,
+                 str(self.data_dir / "graph.db"),
+                 None),
+                ("graph_edges", self.graph_store,
+                 str(self.data_dir / "graph.db"),
+                 None),
+                ("entity_cooccur", self.graph_store,
+                 str(self.data_dir / "graph.db"),
+                 None),
+                ("consolidation_state", self.state_store,
+                 str(self.data_dir / "state.db"),
+                 None),
+            ]:
+                if not dest_store:
+                    continue
+
+                try:
+                    has = await src.execute_fetchall(
+                        "SELECT COUNT(*) FROM sqlite_master "
+                        "WHERE type='table' AND name=?",
+                        (table,),
+                    )
+                    if not has or not has[0][0]:
+                        continue
+
+                    src_count = (await src.execute_fetchall(
+                        f"SELECT COUNT(*) FROM {table}",
+                    ))[0][0]
+                    if src_count == 0:
+                        continue
+
+                    dest_count = (await dest_store.fetchone(
+                        f"SELECT COUNT(*) FROM {table}",
+                    ))[0]
+                    if dest_count > 0:
+                        continue  # 目标库已有数据，跳过
+                except Exception:
+                    continue
+
+                # 复制数据
+                try:
+                    src_rows = await src.execute_fetchall(f"SELECT * FROM {table}")
+
+                    if dest_cols:
+                        cols = ",".join(dest_cols)
+                        placeholders = ",".join("?" for _ in dest_cols)
+                        sql = f"INSERT OR IGNORE INTO {table}({cols}) VALUES ({placeholders})"
+                    else:
+                        # 自动探测列数
+                        info = await src.execute_fetchall(f"PRAGMA table_info({table})")
+                        col_names = [r[1] for r in info]
+                        cols = ",".join(col_names)
+                        placeholders = ",".join("?" for _ in col_names)
+                        sql = f"INSERT OR IGNORE INTO {table}({cols}) VALUES ({placeholders})"
+
+                    async with aiosqlite.connect(dest_path) as dst:
+                        for p in ["PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL"]:
+                            try:
+                                await dst.execute(p)
+                            except Exception:
+                                pass
+                        for row in src_rows:
+                            try:
+                                await dst.execute(sql, row)
+                            except Exception:
+                                pass
+                        await dst.commit()
+
+                    logger.info(f"[Memoria] 旧数据迁移: {src_count} 行 → {Path(dest_path).name}/{table}")
+
+                    # 特殊处理：重建 diary FTS
+                    if table == "diary_entries" and dest_store == self.diary_store:
+                        try:
+                            async with aiosqlite.connect(dest_path) as dst:
+                                await dst.execute(
+                                    "INSERT INTO diary_fts(diary_fts) VALUES('rebuild')"
+                                )
+                                await dst.commit()
+                        except Exception:
+                            pass
+
+                except Exception as e:
+                    logger.warning(f"[Memoria] 旧数据迁移失败 {table}: {e}")
+
+        logger.info("[Memoria] 旧数据迁移完成")
+
     async def _archive_loop(self):
         while not self._initialized:
             await asyncio.sleep(3600)
@@ -426,6 +586,25 @@ class MemoryCore:
             except Exception as e:
                 logger.warning(f"[Memoria] 归档异常: {e}")
                 await asyncio.sleep(3600)
+
+    async def _hotcache_flush_loop(self):
+        """定时将 HotCache → conversations.db（每小时）"""
+        while not self._initialized:
+            await asyncio.sleep(300)
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                if self.hot_cache and self.conversation_store:
+                    flushed = await self.hot_cache.flush_to_db(self.conversation_store)
+                    if flushed:
+                        logger.info(f"[Memoria] HotCache → DB: {flushed} 条")
+                deleted = await self.conversation_store.enforce_retention()
+                if deleted:
+                    logger.info(f"[Memoria] 对话滑动窗口清理: {deleted} 条")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[Memoria] HotCache 刷写异常: {e}")
 
     async def _relates_to_loop(self):
         while not self._initialized:
@@ -487,7 +666,7 @@ class MemoryCore:
             if row and row[0] is not None and row[0] < 10:
                 return
             now = time.time()
-            recent = await self.atom_store.fetchone(
+            recent = await self.diary_store.fetchone(
                 "SELECT COUNT(*) FROM diary_entries WHERE user_id=? AND created_at > ?",
                 (user_id, now - 30 * 86400),
             )

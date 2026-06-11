@@ -103,10 +103,20 @@ class MemoriPlugin(Star):
         """启动 FastAPI 后台服务，提供 Dashboard 和 REST API"""
         api_port = int(self.config.get("api_port", 8765))
         api_host = self.config.get("api_host", "127.0.0.1")
+
+        # 检查 FastAPI / Uvicorn 是否可用（可能不在 AstrBot 的 uv 环境中）
         try:
             from .memori.api import create_app
             import uvicorn
+        except ImportError as e:
+            logger.warning(
+                f"[memori] HTTP 服务跳过: 缺少依赖（{e}）。\n"
+                f"  Dashboard → 安装依赖后可用: pip install 'memori[server]'\n"
+                f"  或独立运行: python -m memori --port {api_port}"
+            )
+            return
 
+        try:
             app = create_app(memory_core=self.core)
             cfg = uvicorn.Config(
                 app=app,
@@ -156,10 +166,14 @@ class MemoriPlugin(Star):
             except Exception:
                 pass
 
-        cs = self.core.conversation_store
-        if cs and raw_text:
-            sid = await cs.get_session_id(event)
-            await cs.add_message(sid, uid, "user", raw_text, sender_name)
+        # 写入热缓存（source of truth），conversations.db 由定时 flush 写入
+        hc = self.core.hot_cache
+        if hc and raw_text:
+            sid = await self.core.conversation_store.get_session_id(event)
+            hc.push(
+                user_id=uid, role="user", content=raw_text,
+                sender_name=sender_name, session_id=sid,
+            )
 
         system_prompt = getattr(event, "system_prompt", "") or ""
         result = await self.core.process_message(
@@ -189,13 +203,13 @@ class MemoriPlugin(Star):
             if not uid or not txt or txt.startswith("/"):
                 return
 
-            cs = self.core.conversation_store
+            # 从热缓存读最近对话（零 SQL，source of truth）
+            hc = self.core.hot_cache
             full_ctx = txt
-            if cs:
+            if hc:
                 try:
-                    sid = await cs.get_session_id(event)
                     bot_name = self.config.get("bot_name", "Hana")
-                    full_ctx = await cs.get_recent_context(sid, limit=10, bot_name=bot_name)
+                    full_ctx = hc.format_recent_context(uid, limit=10, bot_name=bot_name) or txt
                 except Exception:
                     pass
 
@@ -214,16 +228,19 @@ class MemoriPlugin(Star):
         if not self.core:
             return
         try:
-            cs = self.core.conversation_store
-            if cs and response:
-                sid = await cs.get_session_id(event)
+            hc = self.core.hot_cache
+            if hc and response:
+                sid = await self.core.conversation_store.get_session_id(event)
                 uid = AstrBotCtx().get_user_id(event)
                 resp_text = ""
                 if hasattr(response, "result_chain") and response.result_chain:
                     resp_text = response.result_chain.get_plain_text() or ""
                 if resp_text:
                     bot_name = self.config.get("bot_name", "Hana")
-                    await cs.add_message(sid, uid, "assistant", resp_text, bot_name)
+                    hc.push(
+                        user_id=uid, role="assistant", content=resp_text,
+                        sender_name=bot_name, session_id=sid,
+                    )
         except Exception as e:
             logger.error(f"[memori] on_response 出错: {e}")
 

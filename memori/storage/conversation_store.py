@@ -1,4 +1,10 @@
-"""会话存储 — 保存对话历史，为日记提供完整上下文"""
+"""会话存储 — 保存对话历史，为日记提供完整上下文
+
+架构变更（2026-06）：
+- 此库从主存储降级为冷备份
+- 实时读写走 HotMessageCache（内存）
+- 批量写入 + 保留策略在此实现
+"""
 
 from __future__ import annotations
 
@@ -9,7 +15,11 @@ from .base_store import BaseDbStore
 
 
 class ConversationStore(BaseDbStore):
-    """存储用户和 Bot 的对话消息"""
+    """存储用户和 Bot 的对话消息（冷备份角色）"""
+
+    # 保留策略默认值
+    DEFAULT_MAX_DAYS = 7
+    DEFAULT_MAX_PER_USER = 1000
 
     async def initialize(self):
         async with self._connect() as db:
@@ -40,6 +50,10 @@ class ConversationStore(BaseDbStore):
                 CREATE INDEX IF NOT EXISTS idx_messages_session
                 ON messages(session_id, id DESC)
             """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_timestamp
+                ON messages(timestamp)
+            """)
             # 兼容旧表：补齐 sender_id, sender_name
             for col in ["sender_id", "sender_name"]:
                 try:
@@ -50,7 +64,7 @@ class ConversationStore(BaseDbStore):
 
     async def add_message(self, session_id: str, user_id: str, role: str, content: str,
                            sender_name: str = ""):
-        """添加一条消息"""
+        """添加一条消息（单条写入，保留以兼容旧代码）"""
         now = time.time()
         async with self._connect() as db:
             await db.execute(
@@ -67,6 +81,120 @@ class ConversationStore(BaseDbStore):
             )
             await db.commit()
 
+    async def batch_add_messages(self, messages: list[dict]) -> int:
+        """批量写入消息（热缓存刷写用）
+
+        Args:
+            messages: list of dicts with keys:
+                      session_id, user_id, role, content, sender_name, timestamp
+
+        Returns:
+            写入条数
+        """
+        if not messages:
+            return 0
+        now = time.time()
+
+        # 按 session_id 聚合（减少 session 更新次数）
+        sessions_info: dict[str, dict] = {}
+        for msg in messages:
+            sid = msg.get("session_id", "default")
+            uid = msg.get("user_id", "")
+            ts = msg.get("timestamp", now)
+            if sid not in sessions_info:
+                sessions_info[sid] = {
+                    "user_id": uid,
+                    "first_ts": ts,
+                    "last_ts": ts,
+                    "count": 0,
+                }
+            info = sessions_info[sid]
+            info["last_ts"] = max(info["last_ts"], ts)
+            info["first_ts"] = min(info["first_ts"], ts)
+            info["count"] += 1
+
+        async with self._connect() as db:
+            for sid, info in sessions_info.items():
+                await db.execute(
+                    "INSERT OR IGNORE INTO sessions(session_id, user_id, created_at, last_active_at) "
+                    "VALUES (?,?,?,?)",
+                    (sid, info["user_id"], info["first_ts"], info["last_ts"]),
+                )
+                await db.execute(
+                    "UPDATE sessions SET last_active_at=MAX(last_active_at,?), "
+                    "message_count=message_count+? WHERE session_id=?",
+                    (info["last_ts"], info["count"], sid),
+                )
+
+            for msg in messages:
+                await db.execute(
+                    "INSERT INTO messages(session_id, role, content, sender_id, sender_name, timestamp) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (
+                        msg.get("session_id", "default"),
+                        msg["role"],
+                        msg["content"],
+                        msg.get("user_id", ""),
+                        msg.get("sender_name", ""),
+                        msg.get("timestamp", now),
+                    ),
+                )
+            await db.commit()
+
+        # 每次批量写入后立即滑动窗口，保持冷备份不超过上限
+        try:
+            await self.enforce_retention()
+        except Exception:
+            pass
+
+        return len(messages)
+
+    async def enforce_retention(self, max_per_user: int = 1000) -> int:
+        """滑动窗口：每用户只保留最新 N 条消息，超出自动丢弃最旧的
+
+        这是一个"滑动窗口"——新的进来时，最旧的被挤出去。
+        按 sender_id 分组计数，DELET 超出部分的最老消息。
+
+        Args:
+            max_per_user: 每用户最大保留条数（默认 1000）
+
+        Returns:
+            本次丢弃的消息总数
+        """
+        total = 0
+
+        async with self._connect() as db:
+            users = await db.execute_fetchall(
+                "SELECT DISTINCT sender_id FROM messages",
+            )
+            for (uid,) in users:
+                count = (await db.execute_fetchall(
+                    "SELECT COUNT(*) FROM messages WHERE sender_id=?",
+                    (uid,),
+                ))[0][0]
+                if count <= max_per_user:
+                    continue
+                excess = count - max_per_user
+                # 删除该用户最旧的 excess 条消息
+                cur = await db.execute(
+                    "DELETE FROM messages WHERE sender_id=? AND id IN ("
+                    "SELECT id FROM messages WHERE sender_id=? ORDER BY id ASC LIMIT ?"
+                    ")", (uid, uid, excess),
+                )
+                total += cur.rowcount or 0
+
+            # 清理孤立 session
+            await db.execute("""
+                DELETE FROM sessions WHERE session_id NOT IN (
+                    SELECT DISTINCT session_id FROM messages
+                )
+            """)
+            await db.commit()
+
+        return total
+
+    # ── 读取 ──
+
     async def get_recent_context(self, session_id: str, limit: int = 20,
                                   bot_name: str = "我") -> str:
         """获取最近的对话上下文（用于写日记/判断）
@@ -79,7 +207,8 @@ class ConversationStore(BaseDbStore):
         from ..utils.context_formatter import format_msg
         async with self._connect() as db:
             rows = await db.execute_fetchall(
-                "SELECT role, content, sender_name, sender_id, timestamp FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?",
+                "SELECT role, content, sender_name, sender_id, timestamp "
+                "FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?",
                 (session_id, limit),
             )
         if not rows:
@@ -89,9 +218,9 @@ class ConversationStore(BaseDbStore):
         for r in reversed(rows):
             role = r[0]
             content = r[1]
-            name = r[2] or ""  # sender_name
-            sid = r[3] or ""   # sender_id
-            ts = r[4] or now   # timestamp
+            name = r[2] or ""
+            sid = r[3] or ""
+            ts = r[4] or now
             if role == "user":
                 display = name if name else (sid or "用户")
             else:
@@ -108,4 +237,3 @@ class ConversationStore(BaseDbStore):
         if hasattr(event, "get_session_id"):
             return event.get_session_id() or "default"
         return "default"
-

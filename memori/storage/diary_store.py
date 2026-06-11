@@ -133,21 +133,40 @@ class DiaryStore(BaseDbStore):
             """, (user_id, date_str, content.strip(), now, now))
             entry_id = cursor.lastrowid
             await db.commit()
-            # 重建 FTS
+            # 增量同步 FTS（只索引新条目，不再全量 rebuild）
             try:
-                await db.execute("INSERT INTO diary_fts(diary_fts) VALUES('rebuild')")
+                await db.execute(
+                    "INSERT INTO diary_fts(rowid, content) VALUES (?, '')",
+                    (entry_id,),
+                )
+                await db.commit()
             except Exception:
                 pass
             return entry_id
 
     async def read(self, user_id: str, date_str: str) -> str | None:
-        """读取某天的日记"""
-        async with self._connect() as db:
-            rows = await db.execute_fetchall(
-                "SELECT content FROM diary_entries WHERE user_id = ? AND date = ?",
-                (user_id, date_str),
-            )
+        """读取某天最新一条日记"""
+        rows = await self.fetch(
+            "SELECT content FROM diary_entries WHERE user_id = ? AND date = ? ORDER BY id DESC LIMIT 1",
+            (user_id, date_str),
+        )
         return rows[0][0] if rows else None
+
+    async def read_all(self, user_id: str, date_str: str) -> list[dict]:
+        """读取某天所有日记条目（按时间正序）"""
+        rows = await self.fetch("""
+            SELECT id, content, topics, sentiment, importance, created_at
+            FROM diary_entries WHERE user_id = ? AND date = ?
+            ORDER BY id ASC
+        """, (user_id, date_str))
+        return [
+            {
+                "id": r[0], "content": r[1], "topics": r[2],
+                "sentiment": r[3], "importance": r[4],
+                "created_at": r[5],
+            }
+            for r in rows
+        ]
 
     async def list_months(self, user_id: str) -> list[dict[str, str]]:
         """列出所有有日记的年月"""
@@ -188,32 +207,19 @@ class DiaryStore(BaseDbStore):
             )
         return [r[0] for r in rows]
 
-    async def upsert(self, user_id: str, date_str: str, content: str) -> bool:
-        """更新或插入日记 — 已有记录时只改 content + updated_at，保留 created_at"""
-        import time
-        now = time.time()
-        async with self._connect() as db:
-            row = await db.execute_fetchall(
-                "SELECT id FROM diary_entries WHERE user_id=? AND date=? ORDER BY id DESC LIMIT 1",
-                (user_id, date_str),
-            )
-            if row:
-                # 已有记录 → 只更新 content 和时间戳
-                await db.execute(
-                    "UPDATE diary_entries SET content=?, updated_at=? WHERE id=?",
-                    (content, now, row[0][0]),
-                )
-            else:
-                # 新建记录 → 设置完整时间戳
-                await db.execute(
-                    "INSERT INTO diary_entries(user_id,date,content,created_at,updated_at) VALUES(?,?,?,?,?)",
-                    (user_id, date_str, content, now, now),
-                )
-            await db.commit()
-            return True
+    async def upsert(self, user_id: str, date_str: str, content: str) -> int:
+        """追加一篇日记（一天多份，不覆盖已有）
+
+        Returns:
+            新日记的 ID
+        """
+        return await self.append(user_id, date_str, content)
 
     async def update_metadata(self, user_id: str, date_str: str, **kwargs):
-        """更新日记的元数据（话题、情感等）"""
+        """更新某天最新一条日记的元数据
+
+        一天多份日记时精确匹配最新条目，不会误改历史条目。
+        """
         sets = []
         vals = []
         for key, val in kwargs.items():
@@ -222,11 +228,30 @@ class DiaryStore(BaseDbStore):
                 vals.append(val)
         if not sets:
             return
-        vals.append(user_id)
-        vals.append(date_str)
-        async with self._connect() as db:
-            await db.execute(
-                f"UPDATE diary_entries SET {', '.join(sets)} WHERE user_id = ? AND date = ?",
-                vals,
-            )
-            await db.commit()
+        row = await self.fetchone(
+            "SELECT id FROM diary_entries WHERE user_id=? AND date=? ORDER BY id DESC LIMIT 1",
+            (user_id, date_str),
+        )
+        if not row:
+            return
+        vals.append(row[0])
+        await self.execute(
+            f"UPDATE diary_entries SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        )
+
+    async def update_metadata_by_id(self, entry_id: int, **kwargs):
+        """按日记条目 ID 更新元数据（精确操作，不受多条目影响）"""
+        sets = []
+        vals = []
+        for key, val in kwargs.items():
+            if key in ("topics", "sentiment", "importance", "atom_count"):
+                sets.append(f"{key} = ?")
+                vals.append(val)
+        if not sets:
+            return
+        vals.append(entry_id)
+        await self.execute(
+            f"UPDATE diary_entries SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        )

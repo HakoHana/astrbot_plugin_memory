@@ -20,6 +20,16 @@ from .routes import router
 _CONFIG_FILE = "memori_config.json"
 
 
+def _get_default_data_dir() -> str:
+    """获取默认数据目录
+
+    优先级:
+    1. MEMORIA_DATA_DIR 环境变量
+    2. ./data/memori/（独立运行默认）
+    """
+    return os.environ.get("MEMORIA_DATA_DIR") or str(Path.cwd() / "data" / "memori")
+
+
 class BuiltinLLMProvider:
     """memori 内置 LLM Provider — 零外部依赖，直接调用 API
 
@@ -161,7 +171,7 @@ def create_app(
     """
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        resolved_data_dir = data_dir or str(Path.cwd() / "data" / "memori")
+        resolved_data_dir = data_dir or _get_default_data_dir()
         app.state._data_dir = resolved_data_dir
 
         # 从持久化加载配置

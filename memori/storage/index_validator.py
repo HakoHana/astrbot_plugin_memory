@@ -15,7 +15,7 @@ class IndexValidator(BaseDbStore):
         results["atoms_fts"] = await self._check_atoms_fts()
         results["atom_ids"] = await self._check_atom_ids()
         results["graph_integrity"] = await self._check_graph_integrity()
-        results["orphan_atoms"] = await self._check_orphan_atoms()
+        # 孤立原子检查已移至 memory_core 层（分库后需跨 storage.py 查询）
 
         results["summary"] = {
             "all_passed": all(r.get("passed", False) for r in results.values() if isinstance(r, dict)),

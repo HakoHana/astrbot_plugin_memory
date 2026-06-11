@@ -25,37 +25,63 @@ from .base_store import BaseDbStore
 
 # ── 当前 schema 版本 ──────────────────────────────────────
 # 升级此值表示有一套新的迁移要跑。
-# 迁移方法名必须为 _migrate_v{version}。
+# 迁移方法名必须为 _migrate_v{version} 或 _migrate_{scope}_v{version}。
 CURRENT_VERSION = 3
+
+# ── 每类数据库的 schema 版本（默认 0 表示由 Store.initialize() 统一建表） ──
+VERSIONS: dict[str, int] = {
+    "memory": 3,         # v1→v3：memory_atoms 列补齐 + 索引；v2 已迁至 conversations.db
+    "diaries": 0,        # 由 DiaryStore.initialize() 统一建表
+    "conversations": 0,  # 由 ConversationStore.initialize() 统一建表
+    "graph": 0,          # 由 GraphStore.initialize() 统一建表
+    "state": 0,          # 由 StateStore.initialize() 统一建表
+}
 
 # ── 迁移清单（用于日志和调试） ────────────────────────────
 MIGRATION_MANIFEST: dict[int, dict[str, Any]] = {
     1: {
-        "description": "初始扩展：diary_entries 补充列 + memory_atoms 补充列 + diary_id",
+        "description": "memory_atoms 补充列 + diary_id",
         "type": "schema",
         "requires_backup": False,
-        "tables_affected": ["diary_entries", "memory_atoms"],
+        "tables_affected": ["memory_atoms"],
     },
     2: {
-        "description": "会话存储：sessions + messages 表",
+        "description": "[已迁至 conversations.db] 原本创建 sessions + messages 表",
         "type": "schema",
         "requires_backup": False,
-        "tables_affected": ["sessions", "messages"],
+        "tables_affected": [],
     },
     3: {
-        "description": "schema 整合：移除所有 inline ALTER TABLE 逻辑，将 atom_store 和 diary_store 中离散的列补齐迁移收归此处统一管理。后续所有 schema 变更只在此文件添加。",
+        "description": "schema 整合：memory_atoms 列兜底 + 索引",
         "type": "schema",
         "requires_backup": True,
-        "tables_affected": ["memory_atoms", "diary_entries", "graph_nodes", "graph_edges"],
+        "tables_affected": ["memory_atoms"],
     },
 }
 
 
 class DBMigration(BaseDbStore):
-    """管理数据库 schema 版本迁移"""
+    """管理数据库 schema 版本迁移
+
+    支持按 scope 区分不同数据库的迁移版本：
+    - memory: 主数据库（memory_atoms、atomic_facts、user_persona、write_ops 等）
+    - diaries: 日记数据库（diary_entries、diary_fts）
+    - conversations: 会话数据库（sessions、messages）
+    - graph: 图谱数据库（graph_nodes、graph_edges、entity_cooccur）
+    - state: 状态数据库（consolidation_state）
+    """
 
     # 是否创建备份（可被测试覆写）
     create_backup: bool = True
+
+    def __init__(self, db_path: str, scope: str = "memory"):
+        super().__init__(db_path)
+        self.scope = scope
+
+    @property
+    def current_version(self) -> int:
+        """返回当前 scope 的目标版本号"""
+        return VERSIONS.get(self.scope, CURRENT_VERSION)
 
     async def initialize(self):
         """初始化版本跟踪表"""
@@ -103,17 +129,19 @@ class DBMigration(BaseDbStore):
             已执行的版本号列表
         """
         current = await self.get_current_version()
-        if current >= CURRENT_VERSION:
-            logger.info(f"[Migration] schema 已是最新 (v{current})")
+        target = self.current_version
+        if current >= target:
+            scope_label = f"({self.scope}) " if self.scope != "memory" else ""
+            logger.info(f"[Migration] {scope_label}schema 已是最新 v{current}")
             return []
 
         applied: list[int] = []
-        for version in range(current + 1, CURRENT_VERSION + 1):
+        for version in range(current + 1, target + 1):
             manifest = MIGRATION_MANIFEST.get(version, {})
             desc = manifest.get("description", f"v{version}")
 
-            # 需要备份？
-            if manifest.get("requires_backup") and self.create_backup:
+            # 需要备份？只对 memory scope 执行
+            if self.scope == "memory" and manifest.get("requires_backup") and self.create_backup:
                 backup_path = await self._backup(version)
                 if backup_path:
                     logger.info(f"[Migration] v{version} 备份已创建: {backup_path}")
@@ -123,21 +151,23 @@ class DBMigration(BaseDbStore):
                 applied.append(version)
                 continue
 
-            # 执行迁移
-            method_name = f"_migrate_v{version}"
-            method = getattr(self, method_name, None)
+            # 执行迁移：优先 scope 专属方法，回退到通用方法
+            method = getattr(self, f"_migrate_{self.scope}_v{version}", None)
             if not method:
-                logger.warning(f"[Migration] v{version}: 未找到 {method_name}，跳过")
+                method = getattr(self, f"_migrate_v{version}", None)
+            if not method:
+                logger.warning(f"[Migration] ({self.scope}) v{version}: 未找到迁移方法，跳过")
                 continue
 
             try:
                 await method()
                 await self._record_migration(version, desc)
-                logger.info(f"[Migration] v{version} 完成: {desc}")
+                scope_label = f"({self.scope}) " if self.scope != "memory" else ""
+                logger.info(f"[Migration] {scope_label}v{version} 完成: {desc}")
                 applied.append(version)
             except Exception as e:
-                logger.error(f"[Migration] v{version} 失败: {e}")
-                raise RuntimeError(f"Migration v{version} failed: {e}") from e
+                logger.error(f"[Migration] ({self.scope}) v{version} 失败: {e}")
+                raise RuntimeError(f"Migration ({self.scope}) v{version} failed: {e}") from e
 
         return applied
 
@@ -185,42 +215,67 @@ class DBMigration(BaseDbStore):
     # ═══════════════════════════════════════════════════
 
     async def verify_schema(self) -> dict[str, Any]:
-        """检查当前 schema 完整性，返回每张表的列状态"""
-        expected_columns = {
-            "memory_atoms": [
-                "id", "user_id", "diary_date", "atom_type", "content",
-                "entities", "importance", "confidence", "access_count",
-                "created_at", "last_accessed_at", "ttl_days", "expires_at",
-                "decay_type", "status", "session_id", "diary_ref",
-                "diary_snippet", "embedding", "embedding_model", "metadata",
-            ],
-            "diary_entries": [
-                "id", "user_id", "date", "content", "topics", "sentiment",
-                "importance", "atom_count", "created_at", "updated_at", "status",
-            ],
-            "consolidation_state": [
-                "user_id", "msg_count", "warmup_threshold", "last_consolidated_at",
-                "last_diary_date", "diary_count", "diary_count_since_persona",
-                "l1_retry_count",
-            ],
-            "sessions": [
-                "session_id", "user_id", "platform", "created_at",
-                "last_active_at", "message_count", "metadata",
-            ],
-            "messages": [
-                "id", "session_id", "role", "content", "timestamp", "metadata",
-            ],
-            "graph_nodes": [
-                "id", "node_key", "node_type", "value", "canonical_value",
-                "metadata", "created_at", "updated_at",
-            ],
-            "graph_edges": [
-                "id", "edge_key", "semantic_key", "source_node_id",
-                "target_node_id", "relation_type", "source_memory_id",
-                "weight", "confidence", "status", "metadata",
-                "created_at", "updated_at",
-            ],
+        """检查当前 schema 完整性，返回每张表的列状态（按 scope 只检查归属本库的表）"""
+        by_scope = {
+            "memory": {
+                "memory_atoms": [
+                    "id", "user_id", "diary_date", "atom_type", "content",
+                    "entities", "importance", "confidence", "access_count",
+                    "created_at", "last_accessed_at", "ttl_days", "expires_at",
+                    "decay_type", "status", "session_id", "diary_ref",
+                    "diary_snippet", "embedding", "embedding_model", "metadata",
+                ],
+                "atomic_facts": [
+                    "id", "content", "atom_type", "importance", "confidence",
+                    "source_count", "created_at", "updated_at",
+                ],
+                "user_persona": [
+                    "uid", "summary", "full_markdown", "known_ids", "primary_name",
+                    "identity_confidence", "tier", "tags", "version", "last_full_update",
+                    "last_incremental_update", "incremental_count",
+                    "diary_count_since_full",
+                ],
+                "write_ops": [
+                    "id", "user_id", "action", "table_name", "record_id",
+                    "payload", "status", "created_at", "updated_at",
+                ],
+            },
+            "diaries": {
+                "diary_entries": [
+                    "id", "user_id", "date", "content", "topics", "sentiment",
+                    "importance", "atom_count", "created_at", "updated_at", "status",
+                ],
+            },
+            "conversations": {
+                "sessions": [
+                    "session_id", "user_id", "platform", "created_at",
+                    "last_active_at", "message_count", "metadata",
+                ],
+                "messages": [
+                    "id", "session_id", "role", "content", "timestamp", "metadata",
+                ],
+            },
+            "graph": {
+                "graph_nodes": [
+                    "id", "node_key", "node_type", "value", "canonical_value",
+                    "metadata", "created_at", "updated_at",
+                ],
+                "graph_edges": [
+                    "id", "edge_key", "semantic_key", "source_node_id",
+                    "target_node_id", "relation_type", "source_memory_id",
+                    "weight", "confidence", "status", "metadata",
+                    "created_at", "updated_at",
+                ],
+            },
+            "state": {
+                "consolidation_state": [
+                    "user_id", "msg_count", "warmup_threshold", "last_consolidated_at",
+                    "last_diary_date", "diary_count", "diary_count_since_persona",
+                    "l1_retry_count",
+                ],
+            },
         }
+        expected_columns = by_scope.get(self.scope, {})
 
         result = {}
         for table, cols in expected_columns.items():
@@ -251,15 +306,8 @@ class DBMigration(BaseDbStore):
     # ═══════════════════════════════════════════════════
 
     async def _migrate_v1(self):
-        """v1: 补充 diary_entries 和 memory_atoms 的列"""
+        """v1: memory_atoms 补充列 + diary_id（diary_entries 部分已迁至 diaries.db）"""
         async with self._connect() as db:
-            # diary_entries 补充列
-            for col in ["topics", "sentiment", "importance", "atom_count", "status"]:
-                try:
-                    await db.execute(f"ALTER TABLE diary_entries ADD COLUMN {col}")
-                except Exception:
-                    pass
-
             # memory_atoms 补充列
             for col in ["diary_snippet", "expires_at", "decay_type"]:
                 try:
@@ -274,42 +322,13 @@ class DBMigration(BaseDbStore):
 
             await db.commit()
 
-    async def _migrate_v2(self):
-        """v2: 创建 sessions 和 messages 表"""
-        async with self._connect() as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    platform TEXT DEFAULT '',
-                    created_at REAL NOT NULL,
-                    last_active_at REAL NOT NULL,
-                    message_count INTEGER DEFAULT 0,
-                    metadata TEXT DEFAULT '{}'
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    timestamp REAL NOT NULL,
-                    metadata TEXT DEFAULT '{}'
-                )
-            """)
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_messages_sid ON messages(session_id, id DESC)"
-            )
-            await db.commit()
-
     async def _migrate_v3(self):
         """
-        v3: schema 整合 — 确保所有历史补丁列存在
+        v3: memory_atoms 列兜底 + 索引覆盖
 
-        此版本将之前分散在各 Store.initialize() 中的
-        inline ALTER TABLE 全部收归此处。只要 v3 跑过，
-        所有 store 初始化时可安全假定列齐全。
+        只检查 memory.db 中仍保留的表（memory_atoms、write_ops）。
+        diary_entries / graph_nodes / consolidation_state 等表
+        已迁至独立的 diaries.db / graph.db / state.db。
         """
         async with self._connect() as db:
             # ── memory_atoms 完整列检查 ──
@@ -320,7 +339,6 @@ class DBMigration(BaseDbStore):
                 "diary_id INTEGER DEFAULT 0",
             ]:
                 col_name = col_def.split()[0]
-                # 检查列是否已存在
                 cols = await db.execute_fetchall(
                     "SELECT name FROM pragma_table_info('memory_atoms') WHERE name=?",
                     (col_name,),
@@ -336,76 +354,13 @@ class DBMigration(BaseDbStore):
                             f"[Migration] memory_atoms 补充列 {col_name} 失败: {e}"
                         )
 
-            # ── diary_entries 完整列检查 ──
-            for col_def in [
-                "topics TEXT DEFAULT '[]'",
-                "sentiment TEXT DEFAULT ''",
-                "importance REAL DEFAULT 0.5",
-                "atom_count INTEGER DEFAULT 0",
-                "status TEXT DEFAULT 'active'",
-            ]:
-                col_name = col_def.split()[0]
-                cols = await db.execute_fetchall(
-                    "SELECT name FROM pragma_table_info('diary_entries') WHERE name=?",
-                    (col_name,),
-                )
-                if not cols:
-                    try:
-                        await db.execute(
-                            f"ALTER TABLE diary_entries ADD COLUMN {col_def}"
-                        )
-                        logger.info(f"[Migration] diary_entries 补充列: {col_name}")
-                    except Exception as e:
-                        logger.warning(
-                            f"[Migration] diary_entries 补充列 {col_name} 失败: {e}"
-                        )
-
-            # ── graph_nodes 检查（确保外键模式启用） ──
-            nodes_cols = await db.execute_fetchall(
-                "SELECT name FROM pragma_table_info('graph_nodes')"
-            )
-            node_col_names = {r[0] for r in nodes_cols}
-            if node_col_names:
-                # 表存在，补充可能缺失的列
-                for col_def in [
-                    "canonical_value TEXT DEFAULT ''",
-                ]:
-                    col_name = col_def.split()[0]
-                    if col_name not in node_col_names:
-                        try:
-                            await db.execute(
-                                f"ALTER TABLE graph_nodes ADD COLUMN {col_def}"
-                            )
-                        except Exception:
-                            pass
-
-            # ── consolidation_state 表完整性 ──
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS consolidation_state (
-                    user_id TEXT PRIMARY KEY,
-                    msg_count INTEGER DEFAULT 0,
-                    warmup_threshold INTEGER DEFAULT 1,
-                    last_consolidated_at REAL,
-                    last_diary_date TEXT,
-                    diary_count INTEGER DEFAULT 0,
-                    diary_count_since_persona INTEGER DEFAULT 0,
-                    l1_retry_count INTEGER DEFAULT 0
-                )
-            """)
-
-            # ── 索引完整性 ──
-            # 这些索引有些只在 atom_store.initialize() 中创建，
-            # 迁移系统不保证它们存在 → 在这里统一兜底
+            # ── 索引完整性（仅限 memory.db 中的表） ──
             for idx_def in [
                 "CREATE INDEX IF NOT EXISTS idx_atoms_user_status_date ON memory_atoms(user_id, status, diary_date)",
                 "CREATE INDEX IF NOT EXISTS idx_atoms_user_status_imp ON memory_atoms(user_id, status, importance DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_atoms_user_type ON memory_atoms(user_id, atom_type)",
                 "CREATE INDEX IF NOT EXISTS idx_atoms_status_ttl ON memory_atoms(status, ttl_days)",
                 "CREATE INDEX IF NOT EXISTS idx_atoms_user ON memory_atoms(user_id)",
-                "CREATE INDEX IF NOT EXISTS idx_diary_user_date ON diary_entries(user_id, date)",
-                "CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(node_type, canonical_value)",
-                "CREATE INDEX IF NOT EXISTS idx_graph_edges_semantic ON graph_edges(semantic_key)",
-                "CREATE INDEX IF NOT EXISTS idx_graph_edges_memory ON graph_edges(source_memory_id)",
                 "CREATE INDEX IF NOT EXISTS idx_write_ops_status ON write_ops(status, updated_at)",
             ]:
                 try:

@@ -198,9 +198,9 @@ class CommandHandler(ICommandHandler):
                 for atom, aid in zip(new_atoms, ids):
                     atom.atom_id = aid
 
-                # 更新日记重要度 = 最高原子重要度
+                # 更新日记重要度 = 最高原子重要度（精确到日记条目 ID）
                 max_imp = max(a.importance for a in new_atoms) if new_atoms else 0.5
-                await self.diary_store.update_metadata(row_user_id, date_str, importance=max_imp)
+                await self.diary_store.update_metadata_by_id(did, importance=max_imp)
 
                 processed += 1
                 if processed % 10 == 0:

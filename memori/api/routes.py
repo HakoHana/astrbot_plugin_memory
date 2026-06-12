@@ -72,7 +72,7 @@ async def list_memories(
     # 列表模式（日记分页）
     offset = (page - 1) * size
     if uid:
-        rows = await core.atom_store.fetch(
+        rows = await core.diary_store.fetch(
             "SELECT id, user_id, date, importance, sentiment, topics, created_at, content FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT ? OFFSET ?",
             (uid, size, offset),
         )
@@ -80,11 +80,11 @@ async def list_memories(
             "SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)
         ))[0]
     else:
-        rows = await core.atom_store.fetch(
+        rows = await core.diary_store.fetch(
             "SELECT id, user_id, date, importance, sentiment, topics, created_at, content FROM diary_entries ORDER BY date DESC LIMIT ? OFFSET ?",
             (size, offset),
         )
-        total = (await core.atom_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
+        total = (await core.diary_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
 
     items = []
     for r in rows:
@@ -123,7 +123,7 @@ async def list_memories(
 async def get_memory_detail(memory_id: int, core: MemoryCore = Depends(get_core)):
     """获取单条记忆详情"""
     # 先查 diary
-    row = await core.atom_store.fetchone(
+    row = await core.diary_store.fetchone(
         "SELECT * FROM diary_entries WHERE id=?", (memory_id,)
     )
     if not row:
@@ -157,7 +157,7 @@ async def update_memory(memory_id: int, body: MemoryUpdateRequest,
     updates["updated_at"] = time.time()
     sets = ", ".join(f"{k}=?" for k in updates)
     vals = list(updates.values()) + [memory_id]
-    await core.atom_store.execute(f"UPDATE diary_entries SET {sets} WHERE id=?", vals)
+    await core.diary_store.execute(f"UPDATE diary_entries SET {sets} WHERE id=?", vals)
     return {"ok": True}
 
 
@@ -178,7 +178,7 @@ async def delete_memory(memory_id: int, core: MemoryCore = Depends(get_core)):
         await core.atom_store.execute(
             f"UPDATE memory_atoms SET status='forgotten' WHERE id IN ({ph})", eids
         )
-    await core.atom_store.execute("DELETE FROM diary_entries WHERE id=?", (memory_id,))
+    await core.diary_store.execute("DELETE FROM diary_entries WHERE id=?", (memory_id,))
     return {"ok": True, "cleaned_atoms": len(eids)}
 
 
@@ -192,7 +192,7 @@ async def get_timeline(
     """按时间线浏览记忆日期"""
     if year and month:
         ym = f"{year}-{int(month):02d}"
-        rows = await core.atom_store.fetch(
+        rows = await core.diary_store.fetch(
             "SELECT DISTINCT date FROM diary_entries WHERE user_id=? AND date LIKE ? ORDER BY date DESC",
             (uid, f"{ym}%"),
         )
@@ -223,7 +223,7 @@ async def list_diaries(
     """日记列表（分页）"""
     offset = (page - 1) * size
     if uid:
-        rows = await core.atom_store.fetch(
+        rows = await core.diary_store.fetch(
             "SELECT id, user_id, date, importance, sentiment, topics FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT ? OFFSET ?",
             (uid, size, offset),
         )
@@ -231,11 +231,11 @@ async def list_diaries(
             "SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)
         ))[0]
     else:
-        rows = await core.atom_store.fetch(
+        rows = await core.diary_store.fetch(
             "SELECT id, user_id, date, importance, sentiment, topics FROM diary_entries ORDER BY date DESC LIMIT ? OFFSET ?",
             (size, offset),
         )
-        total = (await core.atom_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
+        total = (await core.diary_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
     items = []
     for r in rows:
         topics_raw = r[5]
@@ -260,7 +260,7 @@ async def get_diary(
     core: MemoryCore = Depends(get_core),
 ):
     """获取指定日期日记"""
-    row = await core.atom_store.fetchone(
+    row = await core.diary_store.fetchone(
         "SELECT * FROM diary_entries WHERE user_id=? AND date=? ORDER BY id DESC LIMIT 1",
         (uid, date),
     )
@@ -403,7 +403,7 @@ async def get_stats(core: MemoryCore = Depends(get_core)):
     return {
         "ok": True,
         "users": (await core.atom_store.fetchone("SELECT COUNT(DISTINCT uid) FROM user_persona"))[0] or 0,
-        "diaries": (await core.atom_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0] or 0,
+        "diaries": (await core.diary_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0] or 0,
         "atoms": (await core.atom_store.fetchone("SELECT COUNT(*) FROM memory_atoms WHERE status='active'"))[0] or 0,
         "facts": (await core.atom_store.fetchone("SELECT COUNT(*) FROM atomic_facts"))[0] or 0,
         "graph_nodes": (await core.atom_store.fetchone("SELECT COUNT(*) FROM graph_nodes"))[0] or 0,
@@ -596,7 +596,7 @@ async def shutdown():
 @router.post("/v1/tools/read_diary", response_model=ReadDiaryResponse)
 async def read_diary(body: ReadDiaryRequest, core: MemoryCore = Depends(get_core)):
     """读取完整日记（供 Agent 工具使用）"""
-    row = await core.atom_store.fetchone(
+    row = await core.diary_store.fetchone(
         "SELECT id, user_id, date, content, importance FROM diary_entries WHERE id=?",
         (body.diary_id,),
     )

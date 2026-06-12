@@ -26,8 +26,9 @@ class DedupEngine:
     - 回写源日记 importance
     """
 
-    def __init__(self, atom_store, config: dict[str, Any] | None = None):
+    def __init__(self, atom_store, diary_store=None, config: dict[str, Any] | None = None):
         self.atom_store = atom_store
+        self.diary_store = diary_store
         self.config = config or {}
         self._default_threshold = float(self.config.get("dedup_threshold", 0.6))
         self._semantic_threshold = float(self.config.get("semantic_threshold", 0.92))
@@ -130,10 +131,11 @@ class DedupEngine:
             (boosted, max(new_confidence, atom.confidence), new_expires, atom.atom_id),
         )
 
-        # 回写源日记
+        # 回写源日记（diary_entries 在 diaries.db，需用 diary_store）
         if boosted > atom.importance and atom.diary_id > 0:
             try:
-                await self.atom_store.execute(
+                store = self.diary_store or self.atom_store
+                await store.execute(
                     "UPDATE diary_entries SET importance = MAX(importance, ?) WHERE id = ?",
                     (boosted, atom.diary_id),
                 )

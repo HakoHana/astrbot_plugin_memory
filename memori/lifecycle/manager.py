@@ -41,7 +41,7 @@ class LifecycleManager:
         config = config or {}
 
         # 子引擎
-        self.dedup = DedupEngine(atom_store, config)
+        self.dedup = DedupEngine(atom_store, diary_store, config)
         self.decay = DecayEngine(atom_store, config)
         self.cleanup = CleanupEngine(atom_store, diary_store, config)
 

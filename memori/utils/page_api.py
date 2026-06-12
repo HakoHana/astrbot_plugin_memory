@@ -58,6 +58,11 @@ class PageApi:
     def _db(self):
         return self.core.atom_store
 
+    @property
+    def _db_diary(self):
+        """diary_entries 在 diaries.db，不在 memory.db"""
+        return self.core.diary_store
+
     async def _fetch(self, sql: str, params: tuple | list | None = None) -> list:
         return await self._db.fetch(sql, params)
 
@@ -95,7 +100,7 @@ class PageApi:
         try:
             uid = "Hana"
             user_count = (await self._fetchone("SELECT COUNT(DISTINCT uid) FROM user_persona"))[0] or 0
-            diary_count = (await self._fetchone("SELECT COUNT(*) FROM diary_entries"))[0] or 0
+            diary_count = (await self._db_diary.fetchone("SELECT COUNT(*) FROM diary_entries"))[0] or 0
             atom_count = (await self._fetchone("SELECT COUNT(*) FROM memory_atoms WHERE status='active'"))[0] or 0
             fact_count = (await self._fetchone("SELECT COUNT(*) FROM atomic_facts"))[0] or 0
             node_count = (await self._fetchone("SELECT COUNT(*) FROM graph_nodes"))[0] or 0
@@ -153,17 +158,17 @@ class PageApi:
             offset = (page - 1) * size
 
             if uid:
-                rows = await self._fetch(
+                rows = await self._db_diary.fetch(
                     "SELECT id, user_id, date, importance, sentiment, topics, created_at FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT ? OFFSET ?",
                     (uid, size, offset),
                 )
-                total = (await self._fetchone("SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)))[0]
+                total = (await self._db_diary.fetchone("SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)))[0]
             else:
-                rows = await self._fetch(
+                rows = await self._db_diary.fetch(
                     "SELECT id, user_id, date, importance, sentiment, topics, created_at FROM diary_entries ORDER BY date DESC LIMIT ? OFFSET ?",
                     (size, offset),
                 )
-                total = (await self._fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
+                total = (await self._db_diary.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
 
             items = []
             for r in rows:
@@ -190,7 +195,7 @@ class PageApi:
             eid = int(request.args.get("id", 0))
             if not eid:
                 return self._error("id is required")
-            row = await self._fetchone("SELECT * FROM diary_entries WHERE id=?", (eid,))
+            row = await self._db_diary.fetchone("SELECT * FROM diary_entries WHERE id=?", (eid,))
             if not row:
                 return self._error("not found")
 
@@ -239,7 +244,7 @@ class PageApi:
                 updates["updated_at"] = time.time()
                 sets = ", ".join(f"{k}=?" for k in updates)
                 vals = list(updates.values()) + [entry_id]
-                await self._execute(f"UPDATE diary_entries SET {sets} WHERE id=?", vals)
+                await self._db_diary.execute(f"UPDATE diary_entries SET {sets} WHERE id=?", vals)
             return self._ok({"updated": True, "new_memory_id": entry_id})
         except Exception as e:
             return self._error(str(e))
@@ -258,7 +263,7 @@ class PageApi:
             await self._execute(
                 f"UPDATE memory_atoms SET status='forgotten' WHERE id IN ({placeholders})", eids
             )
-        await self._execute("DELETE FROM diary_entries WHERE id=?", (diary_id,))
+        await self._db_diary.execute("DELETE FROM diary_entries WHERE id=?", (diary_id,))
         return len(eids)
 
     async def delete_memory(self):
@@ -295,7 +300,7 @@ class PageApi:
             status = body.get("status", "active")
             if ids:
                 ph = ",".join("?" * len(ids))
-                await self._execute(
+                await self._db_diary.execute(
                     f"UPDATE diary_entries SET status=? WHERE id IN ({ph})", [status] + ids
                 )
             return self._ok({"updated": True})
@@ -312,17 +317,17 @@ class PageApi:
                 return self._error("uid is required")
             if year and month:
                 ym = f"{year}-{int(month):02d}"
-                rows = await self._fetch(
+                rows = await self._db_diary.fetch(
                     "SELECT DISTINCT date FROM diary_entries WHERE user_id=? AND date LIKE ? ORDER BY date DESC",
                     (uid, f"{ym}%"),
                 )
             elif year:
-                rows = await self._fetch(
+                rows = await self._db_diary.fetch(
                     "SELECT DISTINCT date FROM diary_entries WHERE user_id=? AND date LIKE ? ORDER BY date DESC",
                     (uid, f"{year}%"),
                 )
             else:
-                rows = await self._fetch(
+                rows = await self._db_diary.fetch(
                     "SELECT DISTINCT date FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT 100",
                     (uid,),
                 )
@@ -363,7 +368,7 @@ class PageApi:
             uid = request.args.get("uid", "")
             date = request.args.get("date", "")
             if eid:
-                row = await self._fetchone("SELECT content FROM diary_entries WHERE id=?", (eid,))
+                row = await self._db_diary.fetchone("SELECT content FROM diary_entries WHERE id=?", (eid,))
             elif uid and date:
                 date = self._parse_date(date)
                 row = await self._fetchone(
@@ -488,17 +493,17 @@ class PageApi:
             size = int(request.args.get("size", 20))
             offset = (page - 1) * size
             if uid:
-                rows = await self._fetch(
+                rows = await self._db_diary.fetch(
                     "SELECT id, user_id, date, importance FROM diary_entries WHERE user_id=? AND archived=1 ORDER BY date DESC LIMIT ? OFFSET ?",
                     (uid, size, offset),
                 )
-                total = (await self._fetchone("SELECT COUNT(*) FROM diary_entries WHERE user_id=? AND archived=1", (uid,)))[0]
+                total = (await self._db_diary.fetchone("SELECT COUNT(*) FROM diary_entries WHERE user_id=? AND archived=1", (uid,)))[0]
             else:
-                rows = await self._fetch(
+                rows = await self._db_diary.fetch(
                     "SELECT id, user_id, date, importance FROM diary_entries WHERE archived=1 ORDER BY date DESC LIMIT ? OFFSET ?",
                     (size, offset),
                 )
-                total = (await self._fetchone("SELECT COUNT(*) FROM diary_entries WHERE archived=1"))[0]
+                total = (await self._db_diary.fetchone("SELECT COUNT(*) FROM diary_entries WHERE archived=1"))[0]
             items = [{"id": r[0], "user_id": r[1], "date": r[2], "importance": r[3]} for r in rows]
             return self._ok({"items": items, "total": total, "page": page, "size": size})
         except Exception as e:
@@ -511,7 +516,7 @@ class PageApi:
             ids = body.get("ids", [])
             if ids:
                 ph = ",".join("?" * len(ids))
-                await self._execute(
+                await self._db_diary.execute(
                     f"UPDATE diary_entries SET archived=0 WHERE id IN ({ph})", ids
                 )
             return self._ok({"restored": len(ids)})

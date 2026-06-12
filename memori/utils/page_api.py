@@ -63,6 +63,11 @@ class PageApi:
         """diary_entries 在 diaries.db，不在 memory.db"""
         return self.core.diary_store
 
+    @property
+    def _db_graph(self):
+        """graph_nodes/graph_edges 在 graph.db，不在 memory.db"""
+        return self.core.graph_store
+
     async def _fetch(self, sql: str, params: tuple | list | None = None) -> list:
         return await self._db.fetch(sql, params)
 
@@ -103,8 +108,8 @@ class PageApi:
             diary_count = (await self._db_diary.fetchone("SELECT COUNT(*) FROM diary_entries"))[0] or 0
             atom_count = (await self._fetchone("SELECT COUNT(*) FROM memory_atoms WHERE status='active'"))[0] or 0
             fact_count = (await self._fetchone("SELECT COUNT(*) FROM atomic_facts"))[0] or 0
-            node_count = (await self._fetchone("SELECT COUNT(*) FROM graph_nodes"))[0] or 0
-            edge_count = (await self._fetchone("SELECT COUNT(*) FROM graph_edges"))[0] or 0
+            node_count = (await self._db_graph.fetchone("SELECT COUNT(*) FROM nodes"))[0] or 0
+            edge_count = (await self._db_graph.fetchone("SELECT COUNT(*) FROM edges WHERE status='active'"))[0] or 0
             return self._ok({
                 "users": user_count,
                 "diaries": diary_count,
@@ -117,11 +122,11 @@ class PageApi:
             return self._error(str(e))
 
     async def get_graph_overview(self):
-        """图谱概览：节点类型分布"""
+        """图谱概览：节点类型分布（新表 nodes/edges）"""
         try:
-            rows = await self._fetch("SELECT node_type, COUNT(*) FROM graph_nodes GROUP BY node_type")
+            rows = await self._db_graph.fetch("SELECT type, COUNT(*) FROM nodes GROUP BY type")
             nodes = {r[0]: r[1] for r in rows}
-            relation_rows = await self._fetch("SELECT relation_type, COUNT(*) FROM graph_edges GROUP BY relation_type")
+            relation_rows = await self._db_graph.fetch("SELECT relation_type, COUNT(*) FROM edges WHERE status='active' GROUP BY relation_type")
             edges = {r[0]: r[1] for r in relation_rows}
             return self._ok({"nodes": nodes, "edges": edges})
         except Exception as e:
@@ -130,21 +135,14 @@ class PageApi:
     async def query_graph(self):
         """图查询：实体邻居查询"""
         try:
-            from ..features.graph_engine import GraphEngine
+            if not self.core.graph_engine:
+                return self._error("图谱引擎未初始化")
             body = await self._get_json()
             entity = (body or {}).get("entity", "")
             if not entity:
                 return self._ok({"nodes": [], "edges": []})
-            ge = GraphEngine(
-                graph_store=self.core.graph_store,
-                atom_store=self.core.atom_store,
-                diary_store=self.core.diary_store,
-            )
-            result = await ge.query_neighbors(entity)
-            return self._ok({
-                "nodes": [{"id": n.node_key, "type": n.node_type, "label": n.value} for n in result.get("nodes", [])],
-                "edges": [{"from": e.source, "to": e.target, "label": e.relation_type} for e in result.get("edges", [])],
-            })
+            result = await self.core.graph_engine.query_neighbors(entity)
+            return self._ok(result)
         except Exception as e:
             return self._error(str(e))
 

@@ -305,12 +305,12 @@ async def update_diary(
 
 @router.get("/v1/graph/overview")
 async def graph_overview(core: MemoryCore = Depends(get_core)):
-    """图谱概览"""
-    nodes = await core.atom_store.fetch(
-        "SELECT node_type, COUNT(*) FROM graph_nodes GROUP BY node_type"
+    """图谱概览（新表 nodes/edges）"""
+    nodes = await core.graph_store.fetch(
+        "SELECT type, COUNT(*) FROM nodes GROUP BY type"
     )
-    edges = await core.atom_store.fetch(
-        "SELECT relation_type, COUNT(*) FROM graph_edges GROUP BY relation_type"
+    edges = await core.graph_store.fetch(
+        "SELECT relation_type, COUNT(*) FROM edges WHERE status='active' GROUP BY relation_type"
     )
     return {
         "ok": True,
@@ -321,24 +321,14 @@ async def graph_overview(core: MemoryCore = Depends(get_core)):
 
 @router.post("/v1/graph/query")
 async def graph_query(body: GraphQueryRequest, core: MemoryCore = Depends(get_core)):
-    """实体邻居查询"""
-    from ..features.graph_engine import GraphEngine
-    ge = GraphEngine(
-        graph_store=core.graph_store,
-        atom_store=core.atom_store,
-        diary_store=core.diary_store,
-    )
-    result = await ge.query_neighbors(body.entity)
+    """实体邻居查询（使用 core.graph_engine 单例）"""
+    if not core.graph_engine:
+        return {"ok": False, "error": "图谱引擎未初始化"}
+    result = await core.graph_engine.query_neighbors(body.entity)
     return {
         "ok": True,
-        "nodes": [
-            {"id": n.node_key, "type": n.node_type, "label": n.value}
-            for n in result.get("nodes", [])
-        ],
-        "edges": [
-            {"source": e.source, "target": e.target, "label": e.relation_type}
-            for e in result.get("edges", [])
-        ],
+        "nodes": result.get("nodes", []),
+        "edges": result.get("edges", []),
     }
 
 
@@ -406,8 +396,8 @@ async def get_stats(core: MemoryCore = Depends(get_core)):
         "diaries": (await core.diary_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0] or 0,
         "atoms": (await core.atom_store.fetchone("SELECT COUNT(*) FROM memory_atoms WHERE status='active'"))[0] or 0,
         "facts": (await core.atom_store.fetchone("SELECT COUNT(*) FROM atomic_facts"))[0] or 0,
-        "graph_nodes": (await core.atom_store.fetchone("SELECT COUNT(*) FROM graph_nodes"))[0] or 0,
-        "graph_edges": (await core.atom_store.fetchone("SELECT COUNT(*) FROM graph_edges"))[0] or 0,
+        "graph_nodes": (await core.graph_store.fetchone("SELECT COUNT(*) FROM nodes"))[0] or 0,
+        "graph_edges": (await core.graph_store.fetchone("SELECT COUNT(*) FROM edges WHERE status='active'"))[0] or 0,
     }
 
 

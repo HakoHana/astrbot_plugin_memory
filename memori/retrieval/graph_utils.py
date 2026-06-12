@@ -1,4 +1,4 @@
-"""图路检索共享工具 — fetch_atoms_from_diaries + 辅助函数"""
+"""图路检索共享工具（新表 edges 兼容版）"""
 
 from __future__ import annotations
 
@@ -17,17 +17,6 @@ async def fetch_atoms_from_diaries(
     """从日记 ID 取关联原子，支持分数加权
 
     优先从 atomic_facts 取（语义化），回退到 memory_atoms（原始原子）。
-    score_multiplier 在 ORDER BY 层面生效，保留原子粒度的分数差异性。
-
-    Args:
-        atom_store: AtomStore 实例
-        diary_ids: 日记 ID 列表
-        user_ids: 用户 ID 列表
-        k: 返回 top N
-        score_multiplier: 分数系数（用于 GraphVectorRetriever 传入节点相似度）
-
-    Returns:
-        按加权分数降序排列的 MemoryAtom 列表
     """
     if not diary_ids:
         return []
@@ -35,7 +24,6 @@ async def fetch_atoms_from_diaries(
     did_placeholders = ",".join("?" for _ in diary_ids)
     uid_placeholders = ",".join("?" for _ in user_ids)
 
-    # 当 score_multiplier != 1.0 时，ORDER BY 乘以该系数
     order_expr = f"({score_multiplier} * af.importance) DESC" if score_multiplier != 1.0 else "af.importance DESC"
 
     # 路径 A：通过 diary_fact_links → atomic_facts
@@ -75,12 +63,15 @@ async def fetch_atoms_from_diaries(
     return []
 
 
-async def find_linked_diaries(graph_store: Any, node_ids: list[int]) -> list[int]:
-    """从节点 ID 沿边找到关联的 diary_id
+async def find_linked_diaries(graph_store: Any, node_ids: list[str]) -> list[int]:
+    """从节点 ID 沿 edges 表 mention 边找到关联的 diary_id
 
-    匹配两种边：
-    - mentions: entity → diary
-    - has_meta: topic/emotion/date → diary
+    Args:
+        graph_store: GraphStore 实例
+        node_ids: 节点 TEXT ID 列表（如 ["entity:hako", "entity:coffee"]）
+
+    Returns:
+        关联的 diary_id 列表
     """
     if not node_ids:
         return []
@@ -88,12 +79,12 @@ async def find_linked_diaries(graph_store: Any, node_ids: list[int]) -> list[int
     placeholders = ",".join("?" for _ in node_ids)
     try:
         rows = await graph_store.fetch(
-            f"""SELECT DISTINCT e.source_memory_id
-                FROM graph_edges e
-                WHERE e.source_node_id IN ({placeholders})
-                  AND e.relation_type IN ('mentions', 'has_meta')
-                  AND e.source_memory_id > 0
-                ORDER BY e.source_memory_id DESC
+            f"""SELECT DISTINCT diary_id
+                FROM edges
+                WHERE from_node IN ({placeholders})
+                  AND relation_type = 'mentions'
+                  AND diary_id > 0
+                ORDER BY diary_id DESC
                 LIMIT 30""",
             node_ids,
         )

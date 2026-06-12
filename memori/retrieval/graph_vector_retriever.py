@@ -1,4 +1,4 @@
-"""图路向量检索器 — embedding 语义搜索图谱节点 → 关联原子"""
+"""图路向量检索器 — embedding 语义搜索图节点 → 沿边找关联日记 → 原子"""
 
 from __future__ import annotations
 
@@ -14,12 +14,10 @@ class GraphVectorRetriever:
 
     流水线：
     1. query → embedding
-    2. 在 graph_nodes 上向量搜索 → (node_id, similarity)
-    3. 每个匹配节点 → 沿边找关联 diary_ids
+    2. nodes 表向量搜索 → (node_id TEXT, similarity)
+    3. 每个匹配节点 → edges.mentions → diary_ids
     4. fetch_atoms_from_diaries(score_multiplier=similarity)
-    5. 收集、去重、排序、取 top-k
-
-    每个节点最多贡献 k_per_node 个原子，防止单节点语义稀释。
+    5. 收集、去重、按加权分数排序、取 top-k
     """
 
     def __init__(
@@ -40,23 +38,13 @@ class GraphVectorRetriever:
         user_ids: list[str],
         k: int = 5,
     ) -> list[MemoryAtom]:
-        """图路向量检索
-
-        Args:
-            keywords: 关键词列表（拼接为 query）
-            user_ids: 用户 ID 列表
-            k: 返回 top N
-
-        Returns:
-            按加权分数降序排列的 MemoryAtom 列表
-        """
         if not self.embed or not keywords or not user_ids:
             return []
 
         query = " ".join(keywords)
         query_embed = await self.embed.embed(query)
 
-        # 1. 向量搜索图节点
+        # 1. 向量搜索图节点（新表 nodes，返回 TEXT ID）
         model_name = type(self.embed).__name__
         vector_results = await self.graph_store.search_vector(
             query_embed, k=k * 3, model_name=model_name,
@@ -65,7 +53,7 @@ class GraphVectorRetriever:
             return []
 
         # 2. 每个节点 → diary_ids → 加权原子
-        collected: dict[int, tuple[MemoryAtom, float]] = {}  # atom_id → (atom, effective_score)
+        collected: dict[int, tuple[MemoryAtom, float]] = {}
 
         for node_id, similarity in vector_results:
             diary_ids = await find_linked_diaries(self.graph_store, [node_id])
@@ -85,7 +73,5 @@ class GraphVectorRetriever:
             return []
 
         # 3. 按有效分数降序取 top-k
-        sorted_atoms = [
-            a for a, _ in sorted(collected.values(), key=lambda x: -x[1])
-        ]
+        sorted_atoms = [a for a, _ in sorted(collected.values(), key=lambda x: -x[1])]
         return sorted_atoms[:k]

@@ -125,7 +125,12 @@ class IPersonaEngine(ABC):
 # ═══════════════════════════════════════════════════════════
 
 class IGraphEngine(ABC):
-    """知识图谱引擎接口"""
+    """图谱引擎接口
+
+    职责：实体关系记忆，不取代原子关键词/向量检索。
+    写入：index_diary（单一入口，被 Capturer 回调）
+    读取：query_neighbors / find_linked_diaries
+    """
 
     @abstractmethod
     async def index_diary(
@@ -138,18 +143,18 @@ class IGraphEngine(ABC):
         ...
 
     @abstractmethod
-    async def index_atom(self, atom: MemoryAtom):
-        """为单条原子建立图谱索引"""
+    async def query_neighbors(self, entity_name: str) -> dict:
+        """查询实体的邻居，返回子图"""
         ...
 
     @abstractmethod
-    async def upgrade_cooccur_to_relates(self, min_count: int = 3) -> int:
-        """将高频共现边升级为 relates_to 边"""
+    async def find_linked_diaries(self, node_ids: list[int]) -> list[int]:
+        """从实体节点沿 mention 边找到关联的 diary_id"""
         ...
 
     @abstractmethod
     async def batch_cooccur(self) -> int:
-        """批量重建共现边"""
+        """增量统计 co_occur 边权重"""
         ...
 
 

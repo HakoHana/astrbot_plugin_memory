@@ -256,14 +256,12 @@ class DBMigration(BaseDbStore):
                 ],
             },
             "graph": {
-                "graph_nodes": [
-                    "id", "node_key", "node_type", "value", "canonical_value",
-                    "metadata", "created_at", "updated_at",
-                    "embedding", "embedding_model",
+                "nodes": [
+                    "id", "name", "type", "metadata",
+                    "embedding", "embedding_model", "created_at", "updated_at",
                 ],
-                "graph_edges": [
-                    "id", "edge_key", "semantic_key", "source_node_id",
-                    "target_node_id", "relation_type", "source_memory_id",
+                "edges": [
+                    "id", "from_node", "to_node", "relation_type", "diary_id",
                     "weight", "confidence", "status", "metadata",
                     "created_at", "updated_at",
                 ],

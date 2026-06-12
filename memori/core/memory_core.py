@@ -236,14 +236,12 @@ class MemoryCore:
             graph_store=self.graph_store,
             atom_store=self.atom_store,
             diary_store=self.diary_store,
+            config=self.config,
             embed_provider=self.embed_provider,
         )
 
         # 后台图谱任务
         try:
-            relate_task = asyncio.ensure_future(self._relates_to_loop())
-            self._background_tasks.add(relate_task)
-            relate_task.add_done_callback(self._background_tasks.discard)
             co_task = asyncio.ensure_future(self._cooccur_loop())
             self._background_tasks.add(co_task)
             co_task.add_done_callback(self._background_tasks.discard)
@@ -438,15 +436,6 @@ class MemoryCore:
                 ("messages", self.conversation_store,
                  str(self.data_dir / "conversations.db"),
                  None),
-                ("graph_nodes", self.graph_store,
-                 str(self.data_dir / "graph.db"),
-                 None),
-                ("graph_edges", self.graph_store,
-                 str(self.data_dir / "graph.db"),
-                 None),
-                ("entity_cooccur", self.graph_store,
-                 str(self.data_dir / "graph.db"),
-                 None),
                 ("consolidation_state", self.state_store,
                  str(self.data_dir / "state.db"),
                  None),
@@ -547,23 +536,6 @@ class MemoryCore:
             except Exception as e:
                 logger.warning(f"[Memoria] HotCache 刷写异常: {e}")
 
-    async def _relates_to_loop(self):
-        while not self._initialized:
-            await asyncio.sleep(3600)
-        while True:
-            try:
-                await asyncio.sleep(86400)
-                if not self.graph_engine:
-                    continue
-                created = await self.graph_engine.upgrade_cooccur_to_relates(min_count=3)
-                if created:
-                    logger.info(f"[Memoria] relates_to 边升级: {created} 条")
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"[Memoria] relates_to 升级异常: {e}")
-                await asyncio.sleep(3600)
-
     async def _cooccur_loop(self):
         while not self._initialized:
             await asyncio.sleep(3600)
@@ -573,11 +545,11 @@ class MemoryCore:
                 if not self.graph_engine:
                     continue
                 count = await self.graph_engine.batch_cooccur()
-                logger.info(f"[Memoria] co_occur 批量重建: {count} 对")
+                logger.info(f"[Memoria] co_occur 统计更新: {count} 条")
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(f"[Memoria] co_occur 重建异常: {e}")
+                logger.warning(f"[Memoria] co_occur 更新异常: {e}")
                 await asyncio.sleep(3600)
 
     # ═══════════════════════════════════════════════════

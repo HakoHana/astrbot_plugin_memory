@@ -456,6 +456,11 @@ _CONFIG_META = {
                           "hint": "用 <memory>...</memory> 标签标记记忆内容，方便 LLM 识别"},
     "injection_template": {"type": "text", "default": "", "label": "注入自定义模板", "group": "注入",
                            "hint": "{{content}} = 记忆内容, {{user}} = 用户名。为空则使用内置模板"},
+    "injection_max_tokens": {"type": "int", "default": 600, "label": "注入最大 token 数", "group": "注入",
+                             "hint": "注入记忆的总 token 预算（含画像和日记片段）"},
+    "persona_mode": {"type": "select", "default": "tags", "options": ["tags", "summary", "full"],
+                     "label": "画像模式", "group": "注入",
+                     "hint": "tags=标签, summary=一句话摘要, full=完整描述"},
     "pre_filter_enabled": {"type": "bool", "default": False, "label": "预过滤（新用户降噪）", "group": "注入",
                            "hint": "启用后新用户短消息/重复消息/纯 emoji 不触发 LLM"},
     "trigger_msg_count": {"type": "int", "default": 10, "label": "整理触发消息数", "group": "整理",
@@ -584,3 +589,32 @@ async def shutdown():
     """停止 memori 服务"""
     import os
     os._exit(0)
+
+
+@router.post("/v1/tools/read_diary", response_model=ReadDiaryResponse)
+async def read_diary(body: ReadDiaryRequest, core: MemoryCore = Depends(get_core)):
+    """读取完整日记（供 Agent 工具使用）"""
+    row = await core.atom_store.fetchone(
+        "SELECT id, user_id, date, content, importance FROM diary_entries WHERE id=?",
+        (body.diary_id,),
+    )
+    if not row:
+        raise HTTPException(404, "日记不存在")
+
+    # 关联原子
+    atoms = await core.atom_store.fetch(
+        "SELECT id, content, atom_type, importance FROM memory_atoms "
+        "WHERE diary_id=? AND status='active' ORDER BY importance DESC",
+        (body.diary_id,),
+    )
+
+    return ReadDiaryResponse(
+        diary_id=row[0],
+        date=row[2] or "",
+        content=row[3] or "",
+        importance=row[4] or 0.0,
+        atoms=[
+            {"id": a[0], "content": a[1], "type": a[2], "importance": a[3]}
+            for a in atoms
+        ],
+    )

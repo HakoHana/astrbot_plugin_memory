@@ -182,6 +182,8 @@ class TestRetrievalDataFlow:
         atom_store.get_related_user_ids = AsyncMock(return_value=[])
         atom_store.touch = AsyncMock()
         atom_store._row_to_atom = MagicMock(side_effect=mock_atoms)
+        atom_store.get_persona_tags = AsyncMock(return_value=["工作", "效率"])
+        atom_store.get_persona_summary = AsyncMock(return_value="爱喝茶的用户")
 
         persona_store = MagicMock()
         persona_store.read = AsyncMock(return_value="这是一个爱喝茶的用户。")
@@ -195,10 +197,10 @@ class TestRetrievalDataFlow:
         result = await retriever.get_context_memories("u1", "工作", k=3)
 
         assert isinstance(result, RecallResult)
-        assert result.persona_text == "这是一个爱喝茶的用户。"
+        assert result.persona_text == ""  # 已嵌入 memory_text
         assert len(result.atoms) > 0
         # memory_text 应包含标签
-        assert "关于你" in result.memory_text or "记忆中" in result.memory_text
+        assert "📌 事实" in result.memory_text or "标签" in result.memory_text
 
     async def test_hybrid_search_combines_results(self):
         """hybrid_search 应合并原子和日记结果"""

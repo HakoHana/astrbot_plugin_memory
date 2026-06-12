@@ -692,6 +692,20 @@ class AtomStore(BaseDbStore, MemoryStore):
         )
         return row[0] if row else ""
 
+    async def get_persona_tags(self, uid: str) -> list[str]:
+        """获取用户标签列表"""
+        row = await self.fetchone(
+            "SELECT tags FROM user_persona WHERE uid=?", (uid,)
+        )
+        if not row or not row[0]:
+            return []
+        import json
+        try:
+            tags = json.loads(row[0])
+            return [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
+        except Exception:
+            return []
+
     async def save_persona(self, uid: str, summary: str, full: str = "",
                             incremental: bool = False, tags: str = ""):
         """保存或更新用户画像"""

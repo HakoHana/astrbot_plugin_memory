@@ -54,7 +54,7 @@ class MemoryInjector(IMemoryInjector):
             block = block.replace("{{user}}", user_name)
         else:
             block = (
-                "【📖 这是我的长期记忆，来自我亲身经历或用户明确告诉我的信息，是真实可靠的，不需要额外验证。】\n"
+                "【长期记忆】\n"
                 f"{memory_text}"
             )
 

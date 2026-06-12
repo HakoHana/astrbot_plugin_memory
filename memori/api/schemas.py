@@ -138,3 +138,16 @@ class StatsOut(BaseModel):
 class ErrorOut(BaseModel):
     ok: bool = False
     error: str
+
+
+class ReadDiaryRequest(BaseModel):
+    diary_id: int = Field(..., description="日记条目 ID")
+
+
+class ReadDiaryResponse(BaseModel):
+    ok: bool = True
+    diary_id: int = 0
+    date: str = ""
+    content: str = ""
+    importance: float = 0
+    atoms: list[dict] = []

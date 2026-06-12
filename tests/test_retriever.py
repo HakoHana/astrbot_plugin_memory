@@ -144,7 +144,7 @@ class TestRetriever:
         retriever.persona_store.read = AsyncMock(return_value=None)
         result = await retriever.get_context_memories("user1", "查询", k=3)
         assert isinstance(result, RecallResult)
-        assert result.persona_text is None
+        assert result.persona_text == ""  # 已嵌入 memory_text
 
     async def test_get_context_memories_with_persona(self, retriever):
         retriever.persona_store.read = AsyncMock(return_value="用户画像内容")

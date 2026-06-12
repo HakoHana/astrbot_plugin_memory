@@ -181,27 +181,55 @@ class Retriever(IRetriever):
         """
         生成供注入用的记忆文本
 
-        返回 RecallResult，包含格式化的文本 + 原子列表 + 画像
+        流程：
+        1. 召回 top-k 原子（当前检索逻辑）
+        2. 取最相关原子 → 回溯关联日记 → 选最佳段落
+        3. 画像改用 tags + 一句话摘要（替代旧版全文）
+
+        返回 RecallResult 包含格式化的文本 + 原子 + 日记溯源
         """
         from ..utils.context_formatter import format_date_tag
 
         k = k or self.recall_count
         atoms = await self.recall(user_id, query, k)
-        persona = await self.persona_store.read(user_id)
 
         # 更新原子的访问时间
         for atom in atoms:
             await self.atom_store.touch(atom.atom_id)
 
-        # 组装文本
+        # ── 画像：改用 tags + 摘要（替代旧 PersonaStore Markdown） ──
+        persona_tags = []
+        persona_summary = ""
+        try:
+            persona_tags = await self.atom_store.get_persona_tags(user_id)
+            persona_summary = await self.atom_store.get_persona_summary(user_id)
+        except Exception:
+            pass
+        persona_text = ""
+        if persona_tags:
+            persona_text = f"标签: {', '.join(persona_tags[:8])}"
+        if persona_summary:
+            summary_short = persona_summary[:100].split("\n")[0].strip()
+            if summary_short:
+                persona_text = f"{persona_text}\n摘要: {summary_short}" if persona_text else f"摘要: {summary_short}"
+
+        # ── 最相关原子 → 回溯日记 ──
+        diary_ref = None
+        if atoms:
+            diary_ids = await self._find_atom_diaries(atoms[0])
+            diary_ref = await self._best_diary_segment(
+                diary_ids, atoms[0].content, query,
+            )
+
+        # ── 组装文本 ──
         lines = []
         now = time.time()
 
-        # 画像部分
-        if persona:
-            lines.append(f"【关于你】\n{persona[:300]}")
+        # 画像
+        if persona_text:
+            lines.append(persona_text)
 
-        # 原子部分 — 带时间标签
+        # 原子列表
         if atoms:
             parts = []
             for a in atoms:
@@ -209,21 +237,134 @@ class Retriever(IRetriever):
                 date_tag = f" [{tag}]" if tag else ""
                 parts.append(f"- [{a.atom_type.value}]{date_tag} {a.content[:200]}")
             if parts:
-                lines.append("【我记忆中最近的事】")
+                lines.append("")
+                lines.append("📌 事实")
                 lines.extend(parts)
 
-        # 检查 token 预算
+        # 日记溯源（只跟最相关原子走）
+        if diary_ref:
+            lines.append("")
+            lines.append("📖 溯源原文")
+            lines.append(f"- [{diary_ref['date']} 日记#{diary_ref['diary_id']}] {diary_ref['snippet']}")
+
+        # 搜索提示
+        lines.append("")
+        lines.append("💡 如需查看更多，可以调 search_memories 或 read_diary 工具。")
+
         text = "\n".join(lines)
-        # 简单的 token 估算（中文 ~1.5 字/token，英文 ~4 字/token）
-        if len(text) > self.recall_max_tokens * 4:
-            # 裁剪过长文本
-            text = text[: self.recall_max_tokens * 4] + "..."
+
+        # Token 预算控制
+        max_chars = self.recall_max_tokens * 4
+        if len(text) > max_chars:
+            text = text[:max_chars] + "..."
 
         return RecallResult(
             memory_text=text,
             atoms=atoms,
-            persona_text=persona,
+            persona_text="",  # 已嵌入 memory_text，避免 injector 重复
+            diary_ref=diary_ref,
         )
+
+    async def _find_atom_diaries(self, atom: MemoryAtom) -> list[int]:
+        """给定原子，找到所有关联的日记 ID
+
+        两条路径：
+        - 直接 diary_id（源日记）
+        - 通过 atomic_facts → diary_fact_links（其他提及同一事实的日记）
+        """
+        diary_ids: list[int] = []
+        seen: set[int] = set()
+
+        if atom.diary_id > 0:
+            diary_ids.append(atom.diary_id)
+            seen.add(atom.diary_id)
+
+        try:
+            rows = await self.atom_store.fetch(
+                """SELECT dfl.diary_id FROM atomic_facts af
+                   JOIN diary_fact_links dfl ON af.id = dfl.fact_id
+                   WHERE af.content = ? AND dfl.diary_id != ?
+                   ORDER BY dfl.importance DESC
+                   LIMIT 5""",
+                (atom.content, atom.diary_id),
+            )
+            for r in rows:
+                did = r[0]
+                if did not in seen:
+                    seen.add(did)
+                    diary_ids.append(did)
+        except Exception:
+            pass
+
+        return diary_ids
+
+    async def _best_diary_segment(
+        self, diary_ids: list[int], atom_content: str, query: str, max_len: int = 150,
+    ) -> dict | None:
+        """从多篇日记中找与原子内容最相关的段落
+
+        Args:
+            diary_ids: 候选日记 ID 列表
+            atom_content: 原子内容（作为匹配基准）
+            query: 用户查询
+            max_len: 段落最大字数
+
+        Returns:
+            {diary_id, date, snippet} 或 None
+        """
+        if not diary_ids or not self.diary_store:
+            return None
+
+        import jieba
+        import re
+
+        atom_words = set(jieba.lcut(atom_content)) if atom_content else set()
+        query_words = set(jieba.lcut(query)) if query else set()
+
+        best_score = 0.3  # 最低匹配阈值
+        best_result = None
+
+        for did in diary_ids:
+            row = await self.diary_store.fetchone(
+                "SELECT date, content FROM diary_entries WHERE id=?", (did,)
+            )
+            if not row:
+                continue
+
+            date_str, content = row[0] or "", row[1] or ""
+
+            # 去掉 frontmatter
+            if content.startswith("---"):
+                end = content.find("\n---", 3)
+                if end != -1:
+                    content = content[end + 5:].strip()
+
+            # 分句
+            segments = re.split(r'(?<=[。！？\n])', content)
+
+            for seg in segments:
+                seg = seg.strip()
+                if len(seg) < 15:
+                    continue
+                seg_words = set(jieba.lcut(seg))
+                if not seg_words:
+                    continue
+
+                a_ov = (len(atom_words & seg_words) / len(atom_words | seg_words)
+                        if atom_words else 0)
+                q_ov = (len(query_words & seg_words) / len(query_words | seg_words)
+                        if query_words else 0)
+                score = a_ov * 0.6 + q_ov * 0.4
+
+                if score > best_score:
+                    best_score = score
+                    best_result = {
+                        "diary_id": did,
+                        "date": date_str,
+                        "snippet": seg[:max_len],
+                    }
+
+        return best_result
 
     async def get_recent_context(
         self, user_id: str, session_id: str = "", limit: int = 20, bot_name: str = "我"

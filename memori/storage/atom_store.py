@@ -418,11 +418,6 @@ class AtomStore(BaseDbStore, MemoryStore):
             pass
 
         return related
-        """获取所有有活跃原子的用户"""
-        rows = await self.fetch(
-            "SELECT DISTINCT user_id FROM memory_atoms WHERE status = 'active'"
-        )
-        return [r[0] for r in rows]
 
     # ── 原子 ↔ 日记 多对多桥表 ──
 
@@ -767,6 +762,7 @@ class AtomStore(BaseDbStore, MemoryStore):
             expires_at=d["expires_at"] or 0.0,
             decay_type=self._parse_decay_type(d["decay_type"]),
             diary_snippet=d["diary_snippet"] or "",
+            diary_id=d["diary_id"],
             metadata=self._safe_json_loads(d.get("metadata")),
             embedding=self._deserialize_embedding(d.get("embedding")),
         )

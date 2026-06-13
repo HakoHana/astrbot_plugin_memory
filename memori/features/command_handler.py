@@ -133,7 +133,7 @@ class CommandHandler(ICommandHandler):
             rows = await self.diary_store.fetch("""
                 SELECT d.id, d.date, d.content, d.user_id
                 FROM diary_entries d
-                WHERE (SELECT COUNT(*) FROM memory_atoms a WHERE a.diary_id=d.id) <= 1
+                WHERE (SELECT COUNT(*) FROM atoms_diary_links l WHERE l.diary_id=d.id) <= 1
                 AND length(d.content) > 20
                 ORDER BY d.id
             """)
@@ -160,7 +160,9 @@ class CommandHandler(ICommandHandler):
 
             if not force_all:
                 atoms = await self.atom_store.fetch(
-                    "SELECT content FROM memory_atoms WHERE diary_id=? AND status='active' LIMIT 2",
+                    "SELECT a.content FROM memory_atoms a "
+                    "JOIN atoms_diary_links l ON a.id = l.atom_id "
+                    "WHERE l.diary_id=? AND a.status='active' LIMIT 2",
                     (did,),
                 )
                 if atoms:
@@ -182,7 +184,8 @@ class CommandHandler(ICommandHandler):
 
                 # 删除旧原子
                 await self.atom_store.execute(
-                    "UPDATE memory_atoms SET status='forgotten' WHERE diary_id=?",
+                    "UPDATE memory_atoms SET status='forgotten' WHERE id IN "
+                    "(SELECT atom_id FROM atoms_diary_links WHERE diary_id=?)",
                     (did,),
                 )
 
@@ -197,6 +200,13 @@ class CommandHandler(ICommandHandler):
                 ids = await self.atom_store.insert_many(new_atoms)
                 for atom, aid in zip(new_atoms, ids):
                     atom.atom_id = aid
+                    # 桥表关联
+                    try:
+                        await self.atom_store.link_atom_to_diary(
+                            aid, did, snippet=atom.diary_snippet, importance=atom.importance,
+                        )
+                    except Exception:
+                        pass
 
                 # 更新日记重要度 = 最高原子重要度（精确到日记条目 ID）
                 max_imp = max(a.importance for a in new_atoms) if new_atoms else 0.5

@@ -81,7 +81,9 @@ async def get_memory_detail(memory_id: int, core: MemoryCore = Depends(get_core)
         raise HTTPException(404, "记忆不存在")
 
     diary["atoms"] = await core.atom_store.fetch(
-        "SELECT id, content, atom_type, importance FROM memory_atoms WHERE diary_id=? AND status='active' ORDER BY importance DESC",
+        "SELECT a.id, a.content, a.atom_type, a.importance FROM memory_atoms a "
+        "JOIN atoms_diary_links l ON a.id = l.atom_id "
+        "WHERE l.diary_id=? AND a.status='active' ORDER BY l.importance DESC",
         (memory_id,),
     )
     diary["atoms"] = [
@@ -688,8 +690,9 @@ async def read_diary(body: ReadDiaryRequest, core: MemoryCore = Depends(get_core
 
     # 关联原子
     atoms = await core.atom_store.fetch(
-        "SELECT id, content, atom_type, importance FROM memory_atoms "
-        "WHERE diary_id=? AND status='active' ORDER BY importance DESC",
+        "SELECT a.id, a.content, a.atom_type, a.importance FROM memory_atoms a "
+        "JOIN atoms_diary_links l ON a.id = l.atom_id "
+        "WHERE l.diary_id=? AND a.status='active' ORDER BY l.importance DESC",
         (body.diary_id,),
     )
 

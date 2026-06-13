@@ -39,3 +39,4 @@ Thumbs.db
 # 根目录测试文件（源在 tests/ 下）
 /test_*.py
 
+:memory:*

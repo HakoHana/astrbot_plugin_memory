@@ -132,16 +132,30 @@ class DedupEngine:
             (boosted, max(new_confidence, atom.confidence), new_expires, atom.atom_id),
         )
 
-        # 回写源日记（diary_entries 在 diaries.db，需用 diary_store）
-        if boosted > atom.importance and atom.diary_id > 0:
-            try:
-                store = self.diary_store or self.atom_store
-                await store.execute(
-                    "UPDATE diary_entries SET importance = MAX(importance, ?) WHERE id = ?",
-                    (boosted, atom.diary_id),
-                )
-            except Exception:
-                pass
+        # 回写源日记重要度 — 旧列 + 桥表双路径
+        if boosted > atom.importance:
+            diary_ids: list[int] = []
+            if atom.diary_id > 0:
+                diary_ids.append(atom.diary_id)
+            else:
+                # 新原子通过桥表查多对多关联
+                try:
+                    links = await self.atom_store.fetch(
+                        "SELECT diary_id FROM atoms_diary_links WHERE atom_id=?",
+                        (atom.atom_id,),
+                    )
+                    diary_ids = [r[0] for r in links if r[0] > 0]
+                except Exception:
+                    pass
+            for did in diary_ids:
+                try:
+                    store = self.diary_store or self.atom_store
+                    await store.execute(
+                        "UPDATE diary_entries SET importance = MAX(importance, ?) WHERE id = ?",
+                        (boosted, did),
+                    )
+                except Exception:
+                    pass
 
     # ── forgotten 清理：旧遗忘原子与新原子重复则彻底删除 ──────
 
@@ -169,8 +183,8 @@ class DedupEngine:
                 try:
                     rows = await self.atom_store.fetch(
                         "SELECT id, content FROM memory_atoms "
-                        "WHERE user_id=? AND status='forgotten' AND diary_id=?",
-                        (uid, diary_id),
+                        "WHERE user_id=? AND status='forgotten'",
+                        (uid,),
                     )
                     for r in rows:
                         old_c = (r[1] or "").replace(" ", "")

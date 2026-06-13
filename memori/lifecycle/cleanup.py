@@ -40,8 +40,9 @@ class CleanupEngine:
         threshold = importance_threshold if importance_threshold is not None else self._orphan_importance
 
         rows = await self.atom_store.fetch(
-            "SELECT DISTINCT diary_id FROM memory_atoms "
-            "WHERE status='active' AND importance < ? AND diary_id > 0",
+            "SELECT DISTINCT l.diary_id FROM atoms_diary_links l "
+            "JOIN memory_atoms a ON a.id = l.atom_id "
+            "WHERE a.status='active' AND a.importance < ?",
             (threshold,),
         )
         if not rows:
@@ -61,7 +62,8 @@ class CleanupEngine:
         placeholders = ",".join("?" for _ in orphan_ids)
         cursor = await self.atom_store.execute(
             f"UPDATE memory_atoms SET status='dormant' "
-            f"WHERE status='active' AND importance < ? AND diary_id IN ({placeholders})",
+            f"WHERE status='active' AND importance < ? "
+            f"AND id IN (SELECT atom_id FROM atoms_diary_links WHERE diary_id IN ({placeholders}))",
             (threshold, *orphan_ids),
         )
         count = cursor.rowcount if cursor else 0

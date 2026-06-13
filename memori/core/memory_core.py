@@ -766,6 +766,15 @@ class MemoryCore:
                 ids = await self.atom_store.insert_many(atoms)
                 for atom, aid in zip(atoms, ids):
                     atom.atom_id = aid
+                    # 桥表关联（多对多）
+                    try:
+                        await self.atom_store.link_atom_to_diary(
+                            aid, diary_id,
+                            snippet=atom.diary_snippet,
+                            importance=atom.importance,
+                        )
+                    except Exception:
+                        pass
 
         return {
             "id": diary_id,

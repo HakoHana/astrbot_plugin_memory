@@ -116,6 +116,17 @@ class MemoriPlugin(Star):
             )
             return
 
+        # 等待端口释放（插件重载时旧 socket 可能还没关完）
+        for attempt in range(10):
+            if not await self._is_port_in_use(api_host, api_port):
+                break
+            if attempt == 0:
+                logger.info(f"[memori] 等待端口 {api_port} 释放...")
+            await asyncio.sleep(0.3)
+        else:
+            logger.warning(f"[memori] 端口 {api_port} 一直被占用，跳过 HTTP 服务")
+            return
+
         try:
             app = create_app(memory_core=self.core)
             cfg = uvicorn.Config(
@@ -125,10 +136,33 @@ class MemoriPlugin(Star):
                 log_level="warning",
             )
             server = uvicorn.Server(cfg)
-            self._http_server = asyncio.ensure_future(server.serve())
+            self._http_server_obj = server
+
+            # 安全包装：兜底 uvicorn 的 sys.exit(1)，防止意外崩掉 AstrBot
+            async def _serve_safe():
+                try:
+                    await server.serve()
+                except SystemExit:
+                    pass
+
+            self._http_server = asyncio.ensure_future(_serve_safe())
             logger.info(f"[memori] HTTP 服务已启动: http://{api_host}:{api_port}")
         except Exception as e:
             logger.warning(f"[memori] HTTP 服务启动失败: {e}")
+
+    @staticmethod
+    async def _is_port_in_use(host: str, port: int) -> bool:
+        """检查端口是否被占用"""
+        try:
+            import socket
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=1
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except (ConnectionRefusedError, OSError, asyncio.TimeoutError):
+            return False
 
     def _get_sender_name(self, event) -> str:
         try:
@@ -263,9 +297,16 @@ class MemoriPlugin(Star):
     # ── 卸载清理 ──
 
     async def on_unload(self):
-        # 停止 HTTP 服务
+        # 停止 HTTP 服务 — 先发关闭信号，再等 task 结束，确保 socket 释放
+        if hasattr(self, '_http_server_obj') and self._http_server_obj:
+            self._http_server_obj.should_exit = True
         if hasattr(self, '_http_server') and self._http_server:
-            self._http_server.cancel()
+            try:
+                await asyncio.wait_for(self._http_server, timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._http_server.cancel()
+                # 给操作系统一点时间回收 socket
+                await asyncio.sleep(0.5)
         if self.core:
             await self.core.destroy()
             try:

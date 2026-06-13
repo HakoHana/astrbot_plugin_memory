@@ -12,12 +12,10 @@ MemorizeTool:
 from __future__ import annotations
 
 import json
-import time
 
 from astrbot.core.agent.tool import FunctionTool
 
 from ...memori import MemoryCore
-from ...memori.models.memory_atom import MemoryAtom, AtomType
 
 
 def _json_result(data: dict) -> str:
@@ -105,22 +103,17 @@ class MemorizeTool(FunctionTool):
 
         try:
             uid = "default"
-            today = time.strftime("%Y-%m-%d")
-            diary = await core.diary_store.read(uid, today)
-            if not diary:
-                await core.diary_store.append(uid, today, f"## {time.strftime('%H:%M')}\n\n{content}")
-
-            atom = MemoryAtom(
+            result = await core.add_agent_memory(
                 user_id=uid,
-                diary_date=today,
-                content=content[:200],
-                atom_type=AtomType.FACTUAL,
+                memory=content,
+                key_facts=[content],
                 importance=importance,
             )
-            atom.prepare_insert()
-            aid = await core.atom_store.insert(atom)
-            if core.graph_engine:
-                await core.graph_engine.index_atom(atom)
-            return _json_result({"success": True, "id": aid, "content": content})
+            return _json_result({
+                "success": result["status"] == "ok",
+                "id": result["id"],
+                "atom_count": result["atom_count"],
+                "content": content,
+            })
         except Exception as e:
             return _json_result({"success": False, "error": str(e)})

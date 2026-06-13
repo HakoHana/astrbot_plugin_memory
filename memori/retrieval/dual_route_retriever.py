@@ -140,8 +140,19 @@ class DualRouteRetriever(MultiRouteRetriever):
         self,
         bm25_retriever: BM25Retriever,
         graph_keyword_retriever: GraphKeywordRetriever,
+        vector_retriever: VectorRetriever | None = None,
+        graph_vector_retriever: GraphVectorRetriever | None = None,
     ):
+        import warnings
+        warnings.warn(
+            "DualRouteRetriever 已弃用，请使用 MultiRouteRetriever。"
+            "DualRouteRetriever 的旧签名（仅 2 个参数）会静默禁用向量检索。",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(
             bm25_retriever=bm25_retriever,
             graph_keyword_retriever=graph_keyword_retriever,
+            vector_retriever=vector_retriever,
+            graph_vector_retriever=graph_vector_retriever,
         )

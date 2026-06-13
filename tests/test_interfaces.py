@@ -23,6 +23,7 @@ from memori.core.interfaces import (
     IWarmProcessor,
     IConsolidationManager,
     IHotMessageCache,
+    IUserIdentityResolver,
 )
 
 
@@ -40,6 +41,7 @@ _ALL_INTERFACES = [
     IWarmProcessor,
     IConsolidationManager,
     IHotMessageCache,
+    IUserIdentityResolver,
 ]
 
 

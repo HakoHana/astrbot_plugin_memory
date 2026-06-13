@@ -15,7 +15,18 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.memory_core import MemoryCore
+from .auth import AuthManager
 from .routes import router
+
+# 全局 AuthManager 实例（由 create_app 初始化，deps.py 通过 _get_auth_manager 引用）
+_auth_manager: AuthManager | None = None
+
+
+def _get_auth_manager() -> AuthManager:
+    global _auth_manager
+    if _auth_manager is None:
+        _auth_manager = AuthManager()
+    return _auth_manager
 
 _CONFIG_FILE = "memori_config.json"
 
@@ -201,6 +212,11 @@ def create_app(
             # 初始化后把配置里的模型选择推给 provider
             core.reload_config(core.config)
 
+        # 认证管理器绑定图谱引擎（用于邻居权限检查）
+        if hasattr(app.state, "auth_manager") and app.state.auth_manager:
+            if hasattr(core, "graph_engine") and core.graph_engine:
+                app.state.auth_manager.set_graph_engine(core.graph_engine)
+
         yield
 
         # 关闭时保存配置
@@ -226,6 +242,22 @@ def create_app(
 
     if memory_core is not None:
         app.state.memory_core = memory_core
+
+    # ── 认证初始化 ──
+    global _auth_manager
+    jwt_secret = None
+    try:
+        jwt_secret = kwargs.get("jwt_secret") or (config or {}).get("dashboard", {}).get("jwt_secret")
+    except Exception:
+        pass
+    _auth_manager = AuthManager(config={"api_keys_path": str(Path(data_dir or _get_default_data_dir()) / "api_keys.json")})
+    if jwt_secret:
+        _auth_manager.set_jwt_secret(jwt_secret)
+
+    app.state.auth_manager = _auth_manager
+
+    # 注册认证中间件（先于路由）
+    app.middleware("http")(_auth_manager.auth_middleware)
 
     app.include_router(router, prefix="/api")
 
@@ -292,9 +324,49 @@ def create_app(
     @app.get("/health")
     async def health():
         core = getattr(app.state, "memory_core", None)
+        if not core or not core._initialized:
+            return {"status": "starting", "version": "0.1.0"}
+
+        # 数据库健康检查
+        db_ok = False
+        graph_ok = False
+        node_count = 0
+        edge_count = 0
+        try:
+            row = await core.graph_store.fetchone("SELECT 1")
+            db_ok = row is not None
+            nc = await core.graph_store.fetchone("SELECT COUNT(*) FROM nodes")
+            node_count = nc[0] if nc else 0
+            ec = await core.graph_store.fetchone(
+                "SELECT COUNT(*) FROM edges WHERE status='active'"
+            )
+            edge_count = ec[0] if ec else 0
+        except Exception:
+            db_ok = False
+
+        # LLM / Embed provider 状态
+        llm_configured = bool(core.config.get("llm_provider_id")) or bool(
+            core.config.get("_providers")
+        )
+        embed_configured = bool(core.config.get("embed_provider_id"))
+
+        # 社交边统计
+        social_edges = 0
+        try:
+            se = await core.graph_store.fetchone(
+                "SELECT COUNT(*) FROM edges WHERE relation_type IN ('friend_of','family_of','trusted_by','blocked_by')"
+            )
+            social_edges = se[0] if se else 0
+        except Exception:
+            pass
+
         return {
-            "status": "ok" if core and core._initialized else "starting",
+            "status": "ok",
             "version": "0.1.0",
+            "db": {"connected": db_ok, "nodes": node_count, "edges": edge_count},
+            "social": {"relations": social_edges},
+            "llm": {"configured": llm_configured},
+            "embed": {"configured": embed_configured},
         }
 
     @app.exception_handler(Exception)

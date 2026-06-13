@@ -339,3 +339,29 @@ class IHotMessageCache(ABC):
     async def flush_to_db(self, conversation_store) -> int:
         """将未刷写的消息批量持久化到 conversations.db"""
         ...
+
+
+# ═══════════════════════════════════════════════════════════
+#  用户身份解析器
+# ═══════════════════════════════════════════════════════════
+
+class IUserIdentityResolver(ABC):
+    """用户身份解析器 — GraphEngine 通过此接口获取用户信息
+
+    将图谱引擎与 user_identities / user_persona 表解耦。
+    """
+
+    @abstractmethod
+    async def resolve_display_name(self, display_name: str) -> str | None:
+        """display_name → 系统 uid，没有返回 None"""
+        ...
+
+    @abstractmethod
+    async def get_persona_summary(self, uid: str) -> str:
+        """获取用户画像摘要"""
+        ...
+
+    @abstractmethod
+    async def get_persona_full(self, display_name: str) -> dict | None:
+        """从 display_name 获取完整画像（含 tags/tier/name）"""
+        ...

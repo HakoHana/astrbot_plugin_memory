@@ -736,6 +736,34 @@ class AtomStore(BaseDbStore, MemoryStore):
                 VALUES (?,?,?,?,1,?,?,?)
             """, (uid, summary, full, tags, now, now, now))
 
+    # ── 通用查询（替代 routes.py 中的裸 SQL） ────────────
+
+    async def list_users_with_persona(self) -> list[dict]:
+        """用户列表（含画像数据）"""
+        rows = await self.fetch("""
+            SELECT cp.uid, cp.primary_name, cp.identity_confidence,
+                   up.tier, up.summary, up.last_full_update
+            FROM canonical_users cp
+            LEFT JOIN user_persona up ON cp.uid = up.uid
+            ORDER BY up.last_full_update DESC
+        """)
+        return [{
+            "uid": r[0], "name": r[1] or r[0], "identity_confidence": r[2],
+            "tier": r[3] or "new", "summary": (r[4] or "")[:100],
+            "last_active": r[5],
+        } for r in rows]
+
+    async def get_user_persona(self, uid: str) -> dict | None:
+        """获取用户完整画像"""
+        row = await self.fetchone("SELECT * FROM user_persona WHERE uid=?", (uid,))
+        if not row:
+            return None
+        cols = ["uid", "summary", "full_markdown", "tags", "version", "tier",
+                "last_full_update", "last_incremental_update", "known_ids", "primary_name",
+                "identity_confidence", "incremental_count", "diary_count_since_full",
+                "created_at", "updated_at"]
+        return dict(zip(cols, row))
+
     # ═══════════════════════════════════════════════════
     #  内部工具
     # ═══════════════════════════════════════════════════

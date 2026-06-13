@@ -54,3 +54,20 @@ class DecayEngine:
         )
 
         return count
+
+    async def apply_social_decay(self, graph_engine, days_since: int = 7) -> int:
+        """社交边权重衰减
+
+        Args:
+            graph_engine: GraphEngine 实例（需实现 decay_social_edges 方法）
+            days_since: 距上次互动天数
+
+        Returns:
+            受影响边数
+        """
+        if not self._enabled or not graph_engine:
+            return 0
+        try:
+            return await graph_engine.decay_social_edges(days_since)
+        except Exception:
+            return 0

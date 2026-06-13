@@ -1,5 +1,8 @@
 # memori 核心依赖（在 pyproject.toml 中声明）
 # pip install . 即可安装内核
 #
-# AstrBot 插件额外需：
-#   astrbot (框架自带)
+# AstrBot 插件额外需（仅 AstrBot 环境需要）：
+#   以下依赖用于启动 Dashboard / REST API 服务
+#   如不使用 AstrBot 而用 python -m memori 独立运行，只需 pip install memori[server]
+fastapi>=0.110.0
+uvicorn>=0.29.0

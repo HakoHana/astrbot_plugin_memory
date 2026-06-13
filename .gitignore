@@ -16,3 +16,12 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# 旧版结构（已迁移到 memori/ 子目录）
+/api/
+/core/
+/astrbot/
+/__main__.py
+/conftest.py
+/data/
+

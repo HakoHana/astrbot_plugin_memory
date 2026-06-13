@@ -255,3 +255,99 @@ class DiaryStore(BaseDbStore):
             f"UPDATE diary_entries SET {', '.join(sets)} WHERE id = ?",
             vals,
         )
+
+    # ── 通用查询（替代 routes.py 中的裸 SQL） ────────────
+
+    async def list_paginated(
+        self, uid: str | None = None, page: int = 1, size: int = 20
+    ) -> tuple[list[dict], int]:
+        """分页日记列表
+
+        Returns:
+            (items, total_count)
+        """
+        offset = (page - 1) * size
+        columns = ("id", "user_id", "date", "importance", "sentiment", "topics", "created_at")
+
+        if uid:
+            rows = await self.fetch(
+                f"SELECT {', '.join(columns)} FROM diary_entries "
+                "WHERE user_id=? ORDER BY date DESC LIMIT ? OFFSET ?",
+                (uid, size, offset),
+            )
+            total = (await self.fetchone(
+                "SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)
+            ))[0]
+        else:
+            rows = await self.fetch(
+                f"SELECT {', '.join(columns)} FROM diary_entries "
+                "ORDER BY date DESC LIMIT ? OFFSET ?",
+                (size, offset),
+            )
+            total = (await self.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
+
+        items = []
+        for r in rows:
+            topics_raw = r[5]
+            topics = []
+            if topics_raw:
+                try:
+                    import json
+                    topics = json.loads(topics_raw) if isinstance(topics_raw, str) else topics_raw
+                except Exception:
+                    topics = [str(topics_raw)]
+            items.append({
+                "id": r[0], "user_id": r[1], "date": r[2],
+                "importance": r[3], "sentiment": r[4], "topics": topics,
+                "created_at": r[6],
+            })
+        return items, total
+
+    async def get_by_id(self, entry_id: int) -> dict | None:
+        """按 ID 获取日记条目（动态列映射，不硬编码）"""
+        row = await self.fetchone("SELECT * FROM diary_entries WHERE id=?", (entry_id,))
+        if not row:
+            return None
+        # 从 cursor 描述动态获取列名，避免硬编码与表结构不同步
+        import aiosqlite
+        # 获取 PRAGMA table_info 得到真实列名
+        col_rows = await self.fetch("PRAGMA table_info(diary_entries)")
+        columns = [r[1] for r in col_rows] if col_rows else []
+        if not columns:
+            # fallback 硬编码
+            columns = ["id", "user_id", "date", "content", "topics", "sentiment",
+                       "importance", "atom_count", "created_at", "updated_at",
+                       "status", "archived"]
+        return dict(zip(columns, row))
+
+    async def count(self, uid: str | None = None) -> int:
+        """日记条目计数"""
+        if uid:
+            row = await self.fetchone(
+                "SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)
+            )
+        else:
+            row = await self.fetchone("SELECT COUNT(*) FROM diary_entries")
+        return row[0] if row else 0
+
+    async def get_timeline_dates(self, uid: str, year: str = "", month: str = "") -> list[str]:
+        """获取时间线日期列表"""
+        if not uid:
+            return []
+        if year and month:
+            ym = f"{year}-{int(month):02d}"
+            rows = await self.fetch(
+                "SELECT DISTINCT date FROM diary_entries WHERE user_id=? AND date LIKE ? ORDER BY date DESC",
+                (uid, f"{ym}%"),
+            )
+        elif year:
+            rows = await self.fetch(
+                "SELECT DISTINCT date FROM diary_entries WHERE user_id=? AND date LIKE ? ORDER BY date DESC",
+                (uid, f"{year}%"),
+            )
+        else:
+            rows = await self.fetch(
+                "SELECT DISTINCT date FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT 100",
+                (uid,),
+            )
+        return [r[0] for r in rows]

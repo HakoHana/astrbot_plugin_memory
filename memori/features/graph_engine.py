@@ -20,15 +20,19 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from typing import Any
 
-from ..models.graph_models import GraphNode
+import logging
+logger = logging.getLogger("memori")
+
+from ..models.graph_models import GraphNode, SocialEdge
 from ..storage.graph_store import GraphStore
-from ..storage.atom_store import AtomStore
+from ..core.adapters import CoreUserIdentityResolver
 from ..storage.diary_store import DiaryStore
-from ..core.interfaces import IGraphEngine
+from ..core.interfaces import IGraphEngine, IUserIdentityResolver
 
 
 class GraphEngine(IGraphEngine):
@@ -52,16 +56,16 @@ class GraphEngine(IGraphEngine):
     def __init__(
         self,
         graph_store: GraphStore,
-        atom_store: AtomStore,
         diary_store: DiaryStore,
         config: dict[str, Any] | None = None,
         embed_provider=None,
+        user_identity_resolver: IUserIdentityResolver | None = None,
     ):
         self.graph_store = graph_store
-        self.atom_store = atom_store
         self.diary_store = diary_store
         self.config = config or {}
         self.embed_provider = embed_provider
+        self._identity = user_identity_resolver
 
     # ── 单一写入入口 ───────────────────────────────────
 
@@ -111,14 +115,13 @@ class GraphEngine(IGraphEngine):
         for name in all_names:
             cv = self._canonicalize(name)
             ntype = "entity"
-            try:
-                row = await self.atom_store.fetchone(
-                    "SELECT uid FROM user_identities WHERE display_name=? LIMIT 1", (name,)
-                )
-                if row:
-                    ntype = "user"
-            except Exception:
-                pass
+            if self._identity:
+                try:
+                    uid = await self._identity.resolve_display_name(name)
+                    if uid:
+                        ntype = "user"
+                except Exception:
+                    pass
             entity_nodes.append(GraphNode(node_type=ntype, value=name, canonical_value=cv, metadata={"diary_refs": 1}))
         if entity_nodes:
             node_key_map.update(await self.graph_store.upsert_nodes(entity_nodes))
@@ -208,40 +211,19 @@ class GraphEngine(IGraphEngine):
     # ── co_occur 增量更新 ────────────────────────────
 
     async def _update_cooccur(self, entity_ids: list[str], diary_id: int):
-        """增量更新 entity 间的 co_occur 边（新表 edges）
-
-        对当前日记中出现的所有实体对：
-        - 已有 co_occur 边 → weight += 1
-        - 无 → 创建
-        """
+        """增量更新 entity 间的 co_occur 边"""
         for i in range(len(entity_ids)):
             for j in range(i + 1, len(entity_ids)):
                 a, b = entity_ids[i], entity_ids[j]
                 if a == b:
                     continue
                 src, tgt = (a, b) if a < b else (b, a)
-                edge_key = f"cooccur:{src}:{tgt}"
-
-                existing = await self.graph_store.fetchone(
-                    "SELECT weight FROM edges WHERE from_node=? AND to_node=? AND relation_type='co_occur'",
-                    (src, tgt),
+                await self.graph_store.increment_edge_weight(
+                    from_node=src, to_node=tgt,
+                    relation_type="co_occur",
+                    amount=1.0,
+                    diary_id=diary_id,
                 )
-                if existing:
-                    new_weight = (existing[0] or 1.0) + 1.0
-                    await self.graph_store.execute(
-                        "UPDATE edges SET weight=?, updated_at=? WHERE from_node=? AND to_node=? AND relation_type='co_occur'",
-                        (new_weight, self.graph_store._now_iso(), src, tgt),
-                    )
-                else:
-                    await self.graph_store.add_edge_by_ids(
-                        edge_key=edge_key,
-                        source_node_id=src,
-                        target_node_id=tgt,
-                        relation_type="co_occur",
-                        source_memory_id=diary_id,
-                        weight=1.0,
-                        confidence=0.6,
-                    )
 
     # ── embedding 计算 ────────────────────────────────
 
@@ -402,6 +384,7 @@ class GraphEngine(IGraphEngine):
                 diary_entities[did].append(nid)
 
         updated = 0
+        seen_pairs: set[tuple[str, str]] = set()
         for entities in diary_entities.values():
             if len(entities) < 2:
                 continue
@@ -411,27 +394,290 @@ class GraphEngine(IGraphEngine):
                     if a == b:
                         continue
                     src, tgt = (a, b) if a < b else (b, a)
+                    pair = (src, tgt)
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
                     try:
-                        existing = await self.graph_store.fetchone(
-                            "SELECT weight FROM edges "
-                            "WHERE from_node=? AND to_node=? AND relation_type='co_occur'",
-                            (src, tgt),
+                        new_w = await self.graph_store.increment_edge_weight(
+                            from_node=src, to_node=tgt,
+                            relation_type="co_occur",
+                            amount=1.0,
                         )
-                        if existing:
-                            new_w = max(existing[0] or 1.0, float(sum(
-                                1 for ents in diary_entities.values()
-                                if a in ents and b in ents
-                            )))
-                            if new_w != existing[0]:
-                                await self.graph_store.execute(
-                                    "UPDATE edges SET weight=? WHERE from_node=? AND to_node=? AND relation_type='co_occur'",
-                                    (new_w, src, tgt),
-                                )
-                                updated += 1
+                        updated += 1
                     except Exception:
                         pass
 
         return updated
+
+    # ── 社交关系管理 ────────────────────────────────────
+
+    async def claim_relationship(
+        self, uid: str, target_uid: str, relation_type: str = "friend_of"
+    ) -> SocialEdge | None:
+        """A 声称与 B 的关系，创建 pending 边
+
+        流程：
+        1. 检查是否已存在 blocked_by 边（被对方屏蔽则拒绝）
+        2. 检查是否已存在反向关系
+        3. 创建/更新 pending 边
+        4. 发送通知
+        """
+        # 被对方屏蔽了？
+        blocked = await self.graph_store.get_social_edge(
+            target_uid, uid, relation_type="blocked_by"
+        )
+        if blocked and blocked.status == "active":
+            logger.info(f"[memori] {uid} 已被 {target_uid} 屏蔽，拒绝声称关系")
+            return None
+
+        # 确保双方 user 节点存在（edges 不指向空节点）
+        for uid_to_ensure in (uid, target_uid):
+            user_key = f"user:{uid_to_ensure}"
+            existing = await self.graph_store.fetchone(
+                "SELECT id FROM nodes WHERE id=?", (user_key,)
+            )
+            if not existing:
+                await self.graph_store.upsert_nodes([
+                    GraphNode(
+                        node_type="user",
+                        value=uid_to_ensure[:20],
+                        canonical_value=uid_to_ensure[:80],
+                        metadata={"source": "social_claim"},
+                    )
+                ])
+
+        edge = SocialEdge(
+            from_user=uid,
+            to_user=target_uid,
+            relation_type=relation_type,
+            status="pending",
+            weight=0.1,
+            cap=0.4,
+            source="explicit_claim",
+        )
+        result = await self.graph_store.upsert_social_edge(edge)
+        if result:
+            logger.info(f"[memori] {uid} 声称与 {target_uid} 为 {relation_type}")
+            await self._notify(target_uid, f"{uid} 声称与你为 {relation_type}，请确认")
+        return result
+
+    async def confirm_relationship(self, uid: str, claimer_uid: str) -> SocialEdge | None:
+        """B 确认 A 的关系声称
+
+        pending → active, weight 升到 0.7, 移除 cap
+        """
+        edge = await self.graph_store.get_social_edge(claimer_uid, uid)
+        if not edge or edge.status != "pending":
+            return None
+
+        edge.status = "active"
+        edge.weight = 0.7
+        edge.cap = 1.0
+        edge.source = "mutual_confirmation"
+
+        await self.graph_store.set_social_edge_status(edge.edge_id, "active")
+        await self.graph_store.update_social_edge_weight(edge.edge_id, 0.7)
+
+        # 写入 metadata 更新 cap 和 source
+        meta = json.dumps({"cap": 1.0, "source": "mutual_confirmation",
+                           "from_user": edge.from_user, "to_user": edge.to_user})
+        await self.graph_store.execute(
+            "UPDATE edges SET metadata = ?, updated_at = ? WHERE id = ?",
+            (meta, self.graph_store._now_iso(), edge.edge_id),
+        )
+
+        logger.info(f"[memori] {uid} 确认了 {claimer_uid} 的 {edge.relation_type} 关系")
+        await self._notify(claimer_uid, f"{uid} 确认了你们之间的 {edge.relation_type} 关系")
+        return edge
+
+    async def reject_relationship(self, uid: str, claimer_uid: str) -> bool:
+        """B 拒绝 A 的关系声称 → 删除边"""
+        edge = await self.graph_store.get_social_edge(claimer_uid, uid)
+        if not edge or edge.status != "pending":
+            return False
+        await self.graph_store.set_social_edge_status(edge.edge_id, "rejected")
+        logger.info(f"[memori] {uid} 拒绝了 {claimer_uid} 的 {edge.relation_type} 声称")
+        return True
+
+    async def block_user(self, uid: str, target_uid: str) -> bool:
+        """屏蔽用户 → 插入 blocked_by 边，清除已有关系"""
+        # 先清除双方之间的所有社交边
+        for rel_type in ("friend_of", "family_of", "trusted_by"):
+            edge = await self.graph_store.get_social_edge(uid, target_uid, rel_type)
+            if edge:
+                await self.graph_store.set_social_edge_status(edge.edge_id, "blocked")
+
+        # 创建屏蔽边
+        block_edge = SocialEdge(
+            from_user=uid,
+            to_user=target_uid,
+            relation_type="blocked_by",
+            status="active",
+            weight=1.0,
+            cap=1.0,
+            source="explicit_claim",
+        )
+        result = await self.graph_store.upsert_social_edge(block_edge)
+        return result is not None
+
+    async def form_relation_from_co_occur(
+        self, uid_a: str, uid_b: str
+    ) -> SocialEdge | None:
+        """从两次共现推断被动关系（weight 0.05, status=passive）
+
+        当 A 和 B 在群聊中同时出现时调用，不通知。
+        """
+        # 已存在主动关系则不覆盖
+        existing = await self.graph_store.get_social_edge(uid_a, uid_b)
+        if existing and existing.status in ("active", "pending"):
+            return None
+        existing_rev = await self.graph_store.get_social_edge(uid_b, uid_a)
+        if existing_rev and existing_rev.status in ("active", "pending"):
+            return None
+
+        edge = SocialEdge(
+            from_user=uid_a,
+            to_user=uid_b,
+            relation_type="friend_of",
+            status="passive",
+            weight=0.05,
+            cap=0.4,
+            source="co_occur",
+        )
+        result = await self.graph_store.upsert_social_edge(edge)
+        return result
+
+    async def get_neighbor_ids(self, user_id: str) -> dict[str, float]:
+        """获取用户的所有可访问邻居 {neighbor_id: effective_weight}
+
+        用于认证中间件，自动包含自己（weight=1.0）。
+        排除 blocked_by 的发起方。
+        """
+        neighbors: dict[str, float] = {user_id: 1.0}
+
+        # 查主动社交关系
+        active_edges = await self.graph_store.query_social_neighbors(
+            user_id,
+            min_weight=0.0,
+            status="active",
+            relation_types=["friend_of", "family_of", "trusted_by"],
+        )
+        for edge in active_edges:
+            neighbor = edge.to_user if edge.from_user == user_id else edge.from_user
+            neighbors[neighbor] = max(neighbors.get(neighbor, 0), edge.effective_weight)
+
+        # 查 pending 和 passive 的（低权限）
+        pending_edges = await self.graph_store.query_social_neighbors(
+            user_id,
+            min_weight=0.0,
+            relation_types=["friend_of", "family_of", "trusted_by"],
+        )
+        for edge in pending_edges:
+            if edge.status in ("pending", "passive"):
+                neighbor = edge.to_user if edge.from_user == user_id else edge.from_user
+                current = neighbors.get(neighbor, 0)
+                ew = edge.effective_weight
+                if ew > current:
+                    neighbors[neighbor] = ew
+
+        # 排除已屏蔽我的
+        blocked = await self.graph_store.query_social_neighbors(
+            user_id,
+            relation_types=["blocked_by"],
+        )
+        for edge in blocked:
+            blocker = edge.to_user if edge.from_user == user_id else edge.from_user
+            neighbors.pop(blocker, None)
+
+        return neighbors
+
+    async def get_persona_from_graph_node(self, display_name: str) -> dict | None:
+        """从图谱 user 节点（display_name）查到用户画像
+
+        桥接两个系统（通过 IUserIdentityResolver 解耦）：
+          graph node "user:{display_name}"  →  resolver
+                                         →  user_persona 画像
+
+        Args:
+            display_name: 图谱中的用户显示名（如 "hako"）
+
+        Returns:
+            画像摘要数据，或 None
+        """
+        if not display_name or not self._identity:
+            return None
+        try:
+            return await self._identity.get_persona_full(display_name)
+        except Exception:
+            return None
+
+    async def decay_social_edges(self, days_since_last_interaction: int = 7) -> int:
+        """社交边权重衰减
+
+        衰减因子：
+        - active 边：每 7 天无互动 weight × 0.95
+        - pending 边：每 7 天 × 0.85（更快衰减）
+        - weight < 0.02 的 pending 边自动清理
+
+        Args:
+            days_since_last_interaction: 距上次互动的天数
+
+        Returns:
+            受影响/清理的边数
+        """
+        if days_since_last_interaction < 1:
+            return 0
+
+        updated = 0
+        rate_active = 0.95 ** days_since_last_interaction
+        rate_pending = 0.85 ** days_since_last_interaction
+
+        # active 边衰减
+        try:
+            active_rows = await self.graph_store.fetch(
+                "SELECT id, weight FROM edges "
+                "WHERE relation_type IN ('friend_of','family_of','trusted_by') "
+                "  AND status = 'active'",
+            )
+            for row in active_rows:
+                eid, w = row
+                new_w = w * rate_active
+                if new_w < 0.02:
+                    new_w = 0.02  # 留底线不完全消失
+                await self.graph_store.update_social_edge_weight(eid, new_w)
+                updated += 1
+        except Exception:
+            pass
+
+        # pending 边衰减 + 低值清理
+        try:
+            pending_rows = await self.graph_store.fetch(
+                "SELECT id, weight FROM edges "
+                "WHERE relation_type IN ('friend_of','family_of','trusted_by') "
+                "  AND status = 'pending'",
+            )
+            for row in pending_rows:
+                eid, w = row
+                new_w = w * rate_pending
+                if new_w < 0.02:
+                    await self.graph_store.set_social_edge_status(eid, "rejected")
+                else:
+                    await self.graph_store.update_social_edge_weight(eid, new_w)
+                updated += 1
+        except Exception:
+            pass
+
+        return updated
+
+    # ── 通知钩子 ────────────────────────────────────────
+
+    async def _notify(self, target_uid: str, message: str):
+        """通知用户（Phase 1: 写日志，后续接入 AstrBot 消息推送）"""
+        logger.info(f"[memori] 通知 {target_uid}: {message}")
+        # TODO: 接入 AstrBot 消息接口
+        # if hasattr(self, '_astrbot_context'):
+        #     await self._astrbot_context.send_message(target_uid, message)
 
     # ── 辅助 ──────────────────────────────────────────
 

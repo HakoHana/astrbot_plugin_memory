@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from ..core.memory_core import MemoryCore
-from .deps import get_core
+from .deps import get_core, get_current_user, authorized_user, authorized_write
 from .schemas import *
 
 router = APIRouter()
@@ -57,8 +58,6 @@ async def list_memories(
     core: MemoryCore = Depends(get_core),
 ):
     """记忆列表（分页）或搜索"""
-    import json
-
     # 搜索模式
     if q and uid:
         atoms = await core.retriever.recall(uid, q, 5)
@@ -69,79 +68,25 @@ async def list_memories(
         ]
         return {"ok": True, "results": results, "total": len(results)}
 
-    # 列表模式（日记分页）
-    offset = (page - 1) * size
-    if uid:
-        rows = await core.diary_store.fetch(
-            "SELECT id, user_id, date, importance, sentiment, topics, created_at, content FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT ? OFFSET ?",
-            (uid, size, offset),
-        )
-        total = (await core.atom_store.fetchone(
-            "SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)
-        ))[0]
-    else:
-        rows = await core.diary_store.fetch(
-            "SELECT id, user_id, date, importance, sentiment, topics, created_at, content FROM diary_entries ORDER BY date DESC LIMIT ? OFFSET ?",
-            (size, offset),
-        )
-        total = (await core.diary_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
-
-    items = []
-    for r in rows:
-        topics_raw = r[5]
-        topics = []
-        if topics_raw:
-            try:
-                topics = json.loads(topics_raw) if isinstance(topics_raw, str) else topics_raw
-            except Exception:
-                topics = [str(topics_raw)]
-        content_raw = r[7] or ""
-        # 提取纯文本摘要（去掉 frontmatter）
-        summary = content_raw[:200]
-        if summary.startswith("---"):
-            end = summary.find("---", 3)
-            if end != -1:
-                summary = summary[end + 5:].strip()
-        items.append({
-            "id": r[0],
-            "memory_id": r[0],
-            "user_id": r[1],
-            "date": r[2],
-            "content": summary[:200],
-            "importance": r[3],
-            "avg_importance": r[3],
-            "sentiment": r[4],
-            "topics": topics,
-            "updated_at": r[6],
-            "status": "active",
-            "atom_count": 0,
-        })
+    # 列表模式
+    items, total = await core.diary_store.list_paginated(uid or None, page, size)
     return {"ok": True, "items": items, "total": total}
 
 
 @router.get("/v1/memories/{memory_id}", response_model=dict)
 async def get_memory_detail(memory_id: int, core: MemoryCore = Depends(get_core)):
     """获取单条记忆详情"""
-    # 先查 diary
-    row = await core.diary_store.fetchone(
-        "SELECT * FROM diary_entries WHERE id=?", (memory_id,)
-    )
-    if not row:
+    diary = await core.diary_store.get_by_id(memory_id)
+    if not diary:
         raise HTTPException(404, "记忆不存在")
 
-    columns = ["id", "uid", "user_id", "date", "timestamp", "content", "importance",
-               "mood", "topics", "sentiment", "fact_extracted", "fact_retry_count",
-               "archived", "correction", "created_at"]
-    diary = dict(zip(columns, row))
-
-    # 关联原子
-    atoms = await core.atom_store.fetch(
+    diary["atoms"] = await core.atom_store.fetch(
         "SELECT id, content, atom_type, importance FROM memory_atoms WHERE diary_id=? AND status='active' ORDER BY importance DESC",
         (memory_id,),
     )
     diary["atoms"] = [
         {"id": a[0], "content": a[1], "type": a[2], "importance": a[3]}
-        for a in atoms
+        for a in diary["atoms"]
     ]
     return diary
 
@@ -164,22 +109,10 @@ async def update_memory(memory_id: int, body: MemoryUpdateRequest,
 @router.delete("/v1/memories/{memory_id}")
 async def delete_memory(memory_id: int, core: MemoryCore = Depends(get_core)):
     """删除记忆"""
-    # 清理独占原子
-    exclusive = await core.atom_store.fetch("""
-        SELECT ma.id FROM memory_atoms ma
-        WHERE ma.diary_id=? AND ma.status='active'
-        AND (SELECT COUNT(*) FROM memory_atoms sub
-             WHERE sub.content=ma.content AND sub.user_id=ma.user_id
-             AND sub.status='active' AND sub.diary_id!=ma.diary_id) = 0
-    """, (memory_id,))
-    eids = [r[0] for r in exclusive]
-    if eids:
-        ph = ",".join("?" * len(eids))
-        await core.atom_store.execute(
-            f"UPDATE memory_atoms SET status='forgotten' WHERE id IN ({ph})", eids
-        )
-    await core.diary_store.execute("DELETE FROM diary_entries WHERE id=?", (memory_id,))
-    return {"ok": True, "cleaned_atoms": len(eids)}
+    from ..utils.page_service import PageService
+    svc = PageService(core)
+    result = await svc.delete_memory(memory_id)
+    return {"ok": result.get("ok", True), "cleaned_atoms": result.get("data", {}).get("cleaned_atoms", 0)}
 
 
 @router.get("/v1/memories/timeline")
@@ -190,23 +123,8 @@ async def get_timeline(
     core: MemoryCore = Depends(get_core),
 ):
     """按时间线浏览记忆日期"""
-    if year and month:
-        ym = f"{year}-{int(month):02d}"
-        rows = await core.diary_store.fetch(
-            "SELECT DISTINCT date FROM diary_entries WHERE user_id=? AND date LIKE ? ORDER BY date DESC",
-            (uid, f"{ym}%"),
-        )
-    elif year:
-        rows = await core.atom_store.fetch(
-            "SELECT DISTINCT date FROM diary_entries WHERE user_id=? AND date LIKE ? ORDER BY date DESC",
-            (uid, f"{year}%"),
-        )
-    else:
-        rows = await core.atom_store.fetch(
-            "SELECT DISTINCT date FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT 100",
-            (uid,),
-        )
-    return {"ok": True, "dates": [r[0] for r in rows]}
+    dates = await core.diary_store.get_timeline_dates(uid, year, month)
+    return {"ok": True, "dates": dates}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -221,35 +139,7 @@ async def list_diaries(
     core: MemoryCore = Depends(get_core),
 ):
     """日记列表（分页）"""
-    offset = (page - 1) * size
-    if uid:
-        rows = await core.diary_store.fetch(
-            "SELECT id, user_id, date, importance, sentiment, topics FROM diary_entries WHERE user_id=? ORDER BY date DESC LIMIT ? OFFSET ?",
-            (uid, size, offset),
-        )
-        total = (await core.atom_store.fetchone(
-            "SELECT COUNT(*) FROM diary_entries WHERE user_id=?", (uid,)
-        ))[0]
-    else:
-        rows = await core.diary_store.fetch(
-            "SELECT id, user_id, date, importance, sentiment, topics FROM diary_entries ORDER BY date DESC LIMIT ? OFFSET ?",
-            (size, offset),
-        )
-        total = (await core.diary_store.fetchone("SELECT COUNT(*) FROM diary_entries"))[0]
-    items = []
-    for r in rows:
-        topics_raw = r[5]
-        topics = []
-        if topics_raw:
-            try:
-                topics = json.loads(topics_raw) if isinstance(topics_raw, str) else topics_raw
-            except Exception:
-                topics = [str(topics_raw)]
-        items.append({
-            "id": r[0], "user_id": r[1], "date": r[2],
-            "importance": r[3],
-            "avg_importance": r[3], "sentiment": r[4], "topics": topics,
-        })
+    items, total = await core.diary_store.list_paginated(uid or None, page, size)
     return {"ok": True, "items": items, "total": total, "page": page, "size": size}
 
 
@@ -260,16 +150,14 @@ async def get_diary(
     core: MemoryCore = Depends(get_core),
 ):
     """获取指定日期日记"""
-    row = await core.diary_store.fetchone(
-        "SELECT * FROM diary_entries WHERE user_id=? AND date=? ORDER BY id DESC LIMIT 1",
-        (uid, date),
+    diary = await core.diary_store.get_by_id(
+        (await core.diary_store.fetchone(
+            "SELECT id FROM diary_entries WHERE user_id=? AND date=? ORDER BY id DESC LIMIT 1",
+            (uid, date),
+        ) or [0])[0]
     )
-    if not row:
+    if not diary:
         raise HTTPException(404, "该日期没有日记")
-    columns = ["id", "uid", "user_id", "date", "timestamp", "content", "importance",
-               "mood", "topics", "sentiment", "fact_extracted", "fact_retry_count",
-               "archived", "correction", "created_at"]
-    diary = dict(zip(columns, row))
     return {"ok": True, "data": diary}
 
 
@@ -306,17 +194,8 @@ async def update_diary(
 @router.get("/v1/graph/overview")
 async def graph_overview(core: MemoryCore = Depends(get_core)):
     """图谱概览（新表 nodes/edges）"""
-    nodes = await core.graph_store.fetch(
-        "SELECT type, COUNT(*) FROM nodes GROUP BY type"
-    )
-    edges = await core.graph_store.fetch(
-        "SELECT relation_type, COUNT(*) FROM edges WHERE status='active' GROUP BY relation_type"
-    )
-    return {
-        "ok": True,
-        "nodes": {r[0]: r[1] for r in nodes},
-        "edges": {r[0]: r[1] for r in edges},
-    }
+    stats = await core.graph_store.get_overview_stats()
+    return {"ok": True, **stats}
 
 
 @router.post("/v1/graph/query")
@@ -339,48 +218,79 @@ async def graph_query(body: GraphQueryRequest, core: MemoryCore = Depends(get_co
 @router.get("/v1/users")
 async def list_users(core: MemoryCore = Depends(get_core)):
     """用户列表"""
-    rows = await core.atom_store.fetch("""
-        SELECT cp.uid, cp.primary_name, up.tier, up.summary, up.last_full_update
-        FROM canonical_users cp
-        LEFT JOIN user_persona up ON cp.uid = up.uid
-        ORDER BY up.last_full_update DESC
-    """)
-    users = [
-        {"uid": r[0], "name": r[1] or r[0], "tier": r[2] or "new",
-         "summary": (r[3] or "")[:100], "last_active": r[4]}
-        for r in rows
-    ]
+    users = await core.atom_store.list_users_with_persona()
     return {"ok": True, "users": users}
 
 
 @router.get("/v1/users/{uid}")
 async def get_user_detail(uid: str, core: MemoryCore = Depends(get_core)):
     """用户详情"""
-    row = await core.atom_store.fetchone("SELECT * FROM user_persona WHERE uid=?", (uid,))
-    if not row:
+    data = await core.atom_store.get_user_persona(uid)
+    if not data:
         raise HTTPException(404, "用户不存在")
-    cols = ["uid", "summary", "full_markdown", "tags", "version", "tier",
-            "last_full_update", "last_incremental_update", "known_ids", "primary_name",
-            "identity_confidence", "incremental_count", "diary_count_since_full",
-            "created_at", "updated_at"]
-    return {"ok": True, "data": dict(zip(cols, row))}
+    return {"ok": True, "data": data}
 
 
 @router.get("/v1/users/{uid}/persona")
 async def get_persona(uid: str, core: MemoryCore = Depends(get_core)):
     """获取用户画像"""
-    row = await core.atom_store.fetchone(
-        "SELECT summary, full_markdown, tags FROM user_persona WHERE uid=?", (uid,)
-    )
-    if not row:
+    data = await core.atom_store.get_user_persona(uid)
+    if not data:
         return {"ok": True, "summary": "", "full_markdown": "", "tags": []}
     tags = []
-    if row[2]:
-        try:
-            tags = json.loads(row[2]) if isinstance(row[2], str) else row[2]
-        except Exception:
-            tags = []
-    return {"ok": True, "summary": row[0] or "", "full_markdown": row[1] or "", "tags": tags}
+    try:
+        raw = data.get("tags", "[]")
+        tags = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        tags = []
+    return {"ok": True, "summary": data.get("summary", ""),
+            "full_markdown": data.get("full_markdown", ""), "tags": tags}
+
+
+@router.get("/v1/graph/user/{display_name}/persona")
+async def get_persona_from_graph(
+    display_name: str,
+    core: MemoryCore = Depends(get_core),
+    user_id: str = Depends(get_current_user),
+):
+    """从图谱 user 节点（display_name）查到用户画像
+
+    桥接图谱 → 画像：
+      graph node "user:{display_name}"  →  user_identities → user_persona
+
+    权限：仅当目标用户在当前用户的邻居列表中才返回完整数据
+    """
+    if not core.graph_engine:
+        raise HTTPException(400, "图谱引擎未初始化")
+
+    # 查看是否有社交关系（邻居检查）
+    neighbors = await core.graph_engine.get_neighbor_ids(user_id)
+    neighbor_weight = neighbors.get(display_name, 0)
+
+    persona = await core.graph_engine.get_persona_from_graph_node(display_name)
+    if not persona:
+        raise HTTPException(404, "未找到该用户的画像")
+
+    # 没社交关系：只返回基本信息
+    if neighbor_weight <= 0:
+        return {"ok": True, "data": {"name": persona["name"], "accessible": False}}
+
+    # 有社交关系：根据 weight 返回不同粒度
+    if neighbor_weight >= 0.6:
+        return {"ok": True, "data": {**persona, "accessible": True}}
+    elif neighbor_weight >= 0.4:
+        return {"ok": True, "data": {
+            "name": persona["name"],
+            "summary": persona["summary"][:200],
+            "tier": persona["tier"],
+            "accessible": True,
+        }}
+    else:
+        return {"ok": True, "data": {
+            "name": persona["name"],
+            "tier": persona["tier"],
+            "accessible": True,
+        }}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -577,10 +487,190 @@ async def save_providers(body: dict, request: Request, core: MemoryCore = Depend
 
 
 @router.post("/v1/shutdown")
-async def shutdown():
-    """停止 memori 服务"""
+async def shutdown(user_id: str = Depends(get_current_user)):
+    """停止 memori 服务（需管理员权限）"""
+    # TODO: 接入管理员白名单校验
     import os
+    import logging
+    logging.getLogger("memori").warning(f"[memori] 管理员 {user_id} 请求关闭服务")
     os._exit(0)
+
+
+# ═══════════════════════════════════════════════════════════
+#  社交关系管理
+# ═══════════════════════════════════════════════════════════
+
+
+class ClaimRequest(BaseModel):
+    target_uid: str
+    relation_type: str = "friend_of"
+
+
+@router.post("/v1/relations/claim")
+async def claim_relation(
+    body: ClaimRequest,
+    core: MemoryCore = Depends(get_core),
+    user_id: str = Depends(get_current_user),
+):
+    """A 声称与 B 的关系"""
+    if not core.graph_engine:
+        raise HTTPException(400, "图谱引擎未初始化")
+    if body.target_uid == user_id:
+        raise HTTPException(400, "不能与自己建立关系")
+    result = await core.graph_engine.claim_relationship(
+        user_id, body.target_uid, body.relation_type
+    )
+    if not result:
+        raise HTTPException(409, "声称关系失败（可能已被对方屏蔽）")
+    return {"ok": True, "edge_id": result.edge_id, "status": result.status}
+
+
+@router.post("/v1/relations/{edge_id}/confirm")
+async def confirm_relation(
+    edge_id: str,
+    core: MemoryCore = Depends(get_core),
+    user_id: str = Depends(get_current_user),
+):
+    """确认关系声称（edge_id = social:claimer:type:target）"""
+    if not core.graph_engine:
+        raise HTTPException(400, "图谱引擎未初始化")
+    parts = edge_id.split(":", 2)
+    if len(parts) < 3:
+        raise HTTPException(400, "无效的 edge_id")
+    claimer_uid = parts[1]
+    result = await core.graph_engine.confirm_relationship(user_id, claimer_uid)
+    if not result:
+        raise HTTPException(404, "待确认的关系不存在")
+    return {"ok": True, "edge_id": result.edge_id, "status": result.status}
+
+
+@router.post("/v1/relations/{edge_id}/reject")
+async def reject_relation(
+    edge_id: str,
+    core: MemoryCore = Depends(get_core),
+    user_id: str = Depends(get_current_user),
+):
+    """拒绝关系声称"""
+    if not core.graph_engine:
+        raise HTTPException(400, "图谱引擎未初始化")
+    parts = edge_id.split(":", 2)
+    if len(parts) < 3:
+        raise HTTPException(400, "无效的 edge_id")
+    claimer_uid = parts[1]
+    ok = await core.graph_engine.reject_relationship(user_id, claimer_uid)
+    if not ok:
+        raise HTTPException(404, "待确认的关系不存在")
+    return {"ok": True}
+
+
+@router.post("/v1/relations/block")
+async def block_user(
+    body: ClaimRequest,
+    core: MemoryCore = Depends(get_core),
+    user_id: str = Depends(get_current_user),
+):
+    """屏蔽用户"""
+    if not core.graph_engine:
+        raise HTTPException(400, "图谱引擎未初始化")
+    ok = await core.graph_engine.block_user(user_id, body.target_uid)
+    if not ok:
+        raise HTTPException(500, "屏蔽失败")
+    from . import _get_auth_manager
+    _get_auth_manager().invalidate_cache(user_id)
+    return {"ok": True}
+
+
+@router.get("/v1/relations/neighbors")
+async def get_neighbors(
+    min_weight: float = Query(0.0, ge=0.0, le=1.0),
+    core: MemoryCore = Depends(get_core),
+    user_id: str = Depends(get_current_user),
+):
+    """获取我的社交邻居列表"""
+    if not core.graph_engine:
+        return {"ok": True, "neighbors": {}}
+    neighbors = await core.graph_engine.get_neighbor_ids(user_id)
+    filtered = {uid: w for uid, w in neighbors.items() if uid != user_id and w >= min_weight}
+    return {"ok": True, "neighbors": filtered}
+
+
+@router.get("/v1/relations/pending")
+async def get_pending_relations(
+    core: MemoryCore = Depends(get_core),
+    user_id: str = Depends(get_current_user),
+):
+    """获取待确认的关系列表"""
+    if not core.graph_engine:
+        return {"ok": True, "pending": []}
+    edges = await core.graph_store.query_pending_confirmations(user_id)
+    pending = []
+    for e in edges:
+        pending.append({
+            "edge_id": e.edge_id,
+            "from_user": e.from_user,
+            "relation_type": e.relation_type,
+            "weight": e.weight,
+            "created_at": e.created_at,
+        })
+    return {"ok": True, "pending": pending}
+
+
+@router.delete("/v1/relations/{edge_id}")
+async def remove_relation(
+    edge_id: str,
+    core: MemoryCore = Depends(get_core),
+    user_id: str = Depends(get_current_user),
+):
+    """解除关系"""
+    try:
+        parts = edge_id.split(":", 3)
+        uid_a, uid_b = parts[1], parts[3]
+        if user_id not in (uid_a, uid_b):
+            raise HTTPException(403, "无权操作此关系")
+    except (IndexError, ValueError):
+        raise HTTPException(400, "无效的 edge_id")
+    await core.graph_store.set_social_edge_status(edge_id, "rejected")
+    from . import _get_auth_manager
+    _get_auth_manager().invalidate_cache(user_id)
+    return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════
+#  API Key 管理
+# ═══════════════════════════════════════════════════════════
+
+
+@router.post("/v1/api-keys")
+async def create_api_key(
+    user_id: str = Depends(get_current_user),
+):
+    """生成新的 API Key"""
+    from . import _get_auth_manager
+    key = _get_auth_manager().generate_api_key(user_id)
+    return {"ok": True, "api_key": key}
+
+
+@router.get("/v1/api-keys")
+async def list_my_api_keys(
+    user_id: str = Depends(get_current_user),
+):
+    """列出我的 API Keys"""
+    from . import _get_auth_manager
+    keys = _get_auth_manager().list_api_keys()
+    my_keys = [k for k in keys if k["user_id"] == user_id]
+    return {"ok": True, "keys": my_keys}
+
+
+@router.delete("/v1/api-keys/{key_id}")
+async def revoke_api_key(
+    key_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """撤销 API Key"""
+    from . import _get_auth_manager
+    if not _get_auth_manager().revoke_api_key(key_id):
+        raise HTTPException(404, "API Key 不存在")
+    return {"ok": True}
 
 
 @router.post("/v1/tools/read_diary", response_model=ReadDiaryResponse)

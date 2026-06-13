@@ -6,10 +6,11 @@ edges(id TEXT PK, from_node, to_node, relation_type, diary_id, weight, ...)
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
-from ..models.graph_models import GraphNode
+from ..models.graph_models import GraphNode, SocialEdge
 from .base_store import BaseDbStore
 
 
@@ -180,10 +181,7 @@ class GraphStore(BaseDbStore):
         weight: float = 1.0,
         confidence: float = 0.8,
     ) -> str | None:
-        """添加边
-
-        ON CONFLICT 时 weight += 0.1（标记关系增强）。
-        """
+        """添加边"""
         now = self._now_iso()
         try:
             await self.execute("""
@@ -192,14 +190,209 @@ class GraphStore(BaseDbStore):
                  weight, confidence, status, metadata, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'active', '{}', ?, ?)
                 ON CONFLICT(from_node, to_node, relation_type)
-                DO UPDATE SET weight = weight + 0.1, updated_at = excluded.updated_at
+                DO UPDATE SET weight = weight + ?, updated_at = excluded.updated_at
             """, (
                 edge_key, source_node_id, target_node_id, relation_type,
-                source_memory_id, weight, confidence, now, now,
+                source_memory_id, weight, confidence, now, now, weight,
             ))
             return edge_key
         except Exception:
             return None
+
+    async def increment_edge_weight(
+        self,
+        from_node: str,
+        to_node: str,
+        relation_type: str,
+        amount: float = 1.0,
+        diary_id: int = 0,
+    ) -> float:
+        """增量更新边权重，不存在则创建
+
+        使用 ON CONFLICT 确保并发安全，带重试兜底。
+
+        Args:
+            from_node: 源节点 ID
+            to_node: 目标节点 ID
+            relation_type: 边类型
+            amount: 增量值（首次插入时作为初始 weight）
+            diary_id: 关联日记 ID（首次插入时使用）
+
+        Returns:
+            更新后的 weight
+        """
+        now = self._now_iso()
+        src, tgt = (from_node, to_node) if from_node < to_node else (to_node, from_node)
+        edge_key = f"{relation_type}:{src}:{tgt}"
+
+        # 最多重试 3 次，处理极端并发下的 UNIQUE 冲突
+        for attempt in range(3):
+            try:
+                await self.execute("""
+                    INSERT INTO edges (id, from_node, to_node, relation_type, diary_id,
+                                       weight, confidence, status, metadata, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0.6, 'active', '{}', ?, ?)
+                    ON CONFLICT(from_node, to_node, relation_type)
+                    DO UPDATE SET weight = weight + ?, updated_at = excluded.updated_at
+                """, (edge_key, src, tgt, relation_type, diary_id, amount, now, now, amount))
+                break  # 成功则跳出重试
+            except Exception:
+                if attempt == 2:
+                    raise  # 最后一次重试也失败，向上抛
+                await asyncio.sleep(0.05 * (attempt + 1))  # 退避等待
+
+        row = await self.fetchone(
+            "SELECT weight FROM edges WHERE from_node=? AND to_node=? AND relation_type=?",
+            (src, tgt, relation_type),
+        )
+        return row[0] if row else amount
+
+    async def get_overview_stats(self) -> dict:
+        """图谱概览统计"""
+        try:
+            node_rows = await self.fetch("SELECT type, COUNT(*) FROM nodes GROUP BY type")
+            edge_rows = await self.fetch(
+                "SELECT relation_type, COUNT(*) FROM edges WHERE status='active' GROUP BY relation_type"
+            )
+            return {
+                "nodes": {r[0]: r[1] for r in node_rows},
+                "edges": {r[0]: r[1] for r in edge_rows},
+            }
+        except Exception:
+            return {"nodes": {}, "edges": {}}
+
+    # ── 辅助 ──────────────────────────────────────────
+
+    # ── 社交边 CRUD ────────────────────────────────────
+
+    async def upsert_social_edge(self, edge: SocialEdge) -> SocialEdge | None:
+        """创建或更新社交关系边"""
+        now = self._now_iso()
+        eid = edge.edge_id
+        meta = json.dumps({"cap": edge.cap, "source": edge.source,
+                           "from_user": edge.from_user, "to_user": edge.to_user})
+        from_node = f"user:{edge.from_user}"
+        to_node = f"user:{edge.to_user}"
+
+        try:
+            await self.execute("""
+                INSERT INTO edges (id, from_node, to_node, relation_type, weight,
+                                   status, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(from_node, to_node, relation_type)
+                DO UPDATE SET weight = excluded.weight,
+                              status = excluded.status,
+                              metadata = excluded.metadata,
+                              updated_at = excluded.updated_at
+            """, (eid, from_node, to_node, edge.relation_type, edge.weight,
+                  edge.status, meta, now, now))
+            edge.id = eid
+            edge.created_at = edge.created_at or now
+            edge.updated_at = now
+            return edge
+        except Exception:
+            return None
+
+    async def get_social_edge(self, from_user: str, to_user: str,
+                              relation_type: str = "friend_of") -> SocialEdge | None:
+        """查询单条社交关系"""
+        a, b = (from_user, to_user) if from_user < to_user else (to_user, from_user)
+        eid = f"social:{a}:{relation_type}:{b}"
+        try:
+            row = await self.fetchone(
+                "SELECT id, from_node, to_node, relation_type, weight, status, metadata, "
+                "       created_at, updated_at "
+                "FROM edges WHERE id = ?", (eid,)
+            )
+            if row:
+                return self._row_to_social_edge(row)
+        except Exception:
+            pass
+        return None
+
+    async def query_social_neighbors(
+        self,
+        user_id: str,
+        min_weight: float = 0.0,
+        status: str | None = None,
+        relation_types: list[str] | None = None,
+    ) -> list[SocialEdge]:
+        """查询用户的社交邻居（从 user 节点找 friend_of 等双向边）"""
+        uid_node = f"user:{user_id}"
+        clauses = ["(from_node = ? OR to_node = ?)"]
+        params: list = [uid_node, uid_node]
+
+        if relation_types:
+            placeholders = ",".join("?" for _ in relation_types)
+            clauses.append(f"relation_type IN ({placeholders})")
+            params.extend(relation_types)
+
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+
+        try:
+            rows = await self.fetch(
+                f"SELECT id, from_node, to_node, relation_type, weight, status, metadata, "
+                f"       created_at, updated_at "
+                f"FROM edges WHERE {' AND '.join(clauses)} ORDER BY weight DESC",
+                params,
+            )
+            result = []
+            for row in rows:
+                edge = self._row_to_social_edge(row)
+                if edge and edge.effective_weight >= min_weight:
+                    result.append(edge)
+            return result
+        except Exception:
+            return []
+
+    async def query_pending_confirmations(self, user_id: str) -> list[SocialEdge]:
+        """查询待确认的社交关系（别人声称与你有关）"""
+        uid_node = f"user:{user_id}"
+        try:
+            rows = await self.fetch(
+                "SELECT id, from_node, to_node, relation_type, weight, status, metadata, "
+                "       created_at, updated_at "
+                "FROM edges WHERE to_node = ? AND status = 'pending' "
+                "  AND relation_type IN ('friend_of', 'family_of', 'trusted_by') "
+                "ORDER BY created_at DESC",
+                (uid_node,),
+            )
+            return [self._row_to_social_edge(r) for r in rows if r]
+        except Exception:
+            return []
+
+    async def update_social_edge_weight(self, edge_id: str, weight: float):
+        """更新社交边权重"""
+        await self.execute(
+            "UPDATE edges SET weight = ?, updated_at = ? WHERE id = ?",
+            (weight, self._now_iso(), edge_id),
+        )
+
+    async def set_social_edge_status(self, edge_id: str, status: str):
+        """设置社交边状态（confirm / reject / block）"""
+        await self.execute(
+            "UPDATE edges SET status = ?, updated_at = ? WHERE id = ?",
+            (status, self._now_iso(), edge_id),
+        )
+
+    async def count_social_edges(self, user_id: str | None = None) -> int:
+        """统计社交边数量"""
+        if user_id:
+            uid_node = f"user:{user_id}"
+            row = await self.fetchone(
+                "SELECT COUNT(*) FROM edges "
+                "WHERE (from_node = ? OR to_node = ?) "
+                "  AND relation_type IN ('friend_of','family_of','trusted_by')",
+                (uid_node, uid_node),
+            )
+        else:
+            row = await self.fetchone(
+                "SELECT COUNT(*) FROM edges "
+                "WHERE relation_type IN ('friend_of','family_of','trusted_by')",
+            )
+        return row[0] if row else 0
 
     # ── 辅助 ──────────────────────────────────────────
 
@@ -207,3 +400,30 @@ class GraphStore(BaseDbStore):
     def _now_iso() -> str:
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _row_to_social_edge(row) -> SocialEdge | None:
+        """将 SQL 行转为 SocialEdge"""
+        try:
+            from ..models.graph_models import SocialEdge
+            eid, from_node, to_node, rel_type, weight, status, meta_str, created, updated = row
+            meta = json.loads(meta_str) if isinstance(meta_str, str) and meta_str not in ("{}", "") else {}
+
+            # from_node = "user:xxx" → 提取 uid
+            from_user = from_node.split(":", 1)[1] if ":" in from_node else from_node
+            to_user = to_node.split(":", 1)[1] if ":" in to_node else to_node
+
+            return SocialEdge(
+                id=eid,
+                from_user=from_user,
+                to_user=to_user,
+                relation_type=rel_type,
+                status=status,
+                weight=weight,
+                cap=meta.get("cap", 0.4),
+                source=meta.get("source", "unknown"),
+                created_at=created,
+                updated_at=updated,
+            )
+        except Exception:
+            return None

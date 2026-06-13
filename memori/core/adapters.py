@@ -191,3 +191,71 @@ class MemoryStore(ABC):
         接入向量数据库后实现此方法。
         """
         raise NotImplementedError
+
+
+class CoreUserIdentityResolver:
+    """基于 AtomStore 的用户身份解析器 — GraphEngine 跨域解耦
+
+    实现 IUserIdentityResolver 接口，将 user_identities 和 user_persona
+    查询从 GraphEngine 中抽离出来。
+    """
+
+    def __init__(self, atom_store):
+        self._store = atom_store
+
+    async def resolve_display_name(self, display_name: str) -> str | None:
+        if not display_name or not self._store:
+            return None
+        try:
+            row = await self._store.fetchone(
+                "SELECT uid FROM user_identities WHERE display_name=? LIMIT 1",
+                (display_name,),
+            )
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    async def get_persona_summary(self, uid: str) -> str:
+        if not uid or not self._store:
+            return ""
+        try:
+            row = await self._store.fetchone(
+                "SELECT summary FROM user_persona WHERE uid=?", (uid,)
+            )
+            return row[0] if row else ""
+        except Exception:
+            return ""
+
+    async def get_persona_full(self, display_name: str) -> dict | None:
+        if not display_name or not self._store:
+            return None
+        try:
+            uid_row = await self._store.fetchone(
+                "SELECT uid FROM user_identities WHERE display_name=? LIMIT 1",
+                (display_name,),
+            )
+            if not uid_row:
+                return None
+            uid = uid_row[0]
+            persona = await self._store.fetchone(
+                "SELECT summary, tags, tier, primary_name FROM user_persona WHERE uid=?",
+                (uid,),
+            )
+            if not persona:
+                return {"uid": uid, "summary": "", "tags": [], "tier": "new"}
+            import json
+            tags = []
+            if persona[1]:
+                try:
+                    tags = json.loads(persona[1]) if isinstance(persona[1], str) else persona[1]
+                except Exception:
+                    tags = []
+            return {
+                "uid": uid,
+                "summary": persona[0] or "",
+                "tags": tags,
+                "tier": persona[2] or "new",
+                "name": persona[3] or display_name,
+            }
+        except Exception:
+            return None

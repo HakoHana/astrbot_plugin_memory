@@ -138,67 +138,84 @@ class MemoryCore:
         self._background_tasks: set[asyncio.Task] = set()
 
     async def initialize(self):
-        """初始化所有模块"""
+        """初始化所有模块 — 按阶段拆解"""
         if self._initialized:
             return
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._prompts_dir = str(Path(__file__).parent.parent / "prompts")
+        self._db_path = str(self.data_dir / "memory.db")
+        self._diaries_db = str(self.data_dir / "diaries.db")
+        self._conversations_db = str(self.data_dir / "conversations.db")
+        self._graph_db = str(self.data_dir / "graph.db")
+        self._state_db = str(self.data_dir / "state.db")
 
-        prompts_dir = str(Path(__file__).parent.parent / "prompts")
-        db_path = str(self.data_dir / "memory.db")
+        await self._phase1_core_deps()
+        await self._phase2_db_migration()
+        await self._phase3_stores()
+        await self._phase4_data_recovery()
+        self._phase5_graph_engine()
+        await self._phase6_business_modules()
+        await self._phase7_background_processing()
+        await self._phase8_scheduler()
+
+        self._initialized = True
+
+    # ── 初始化阶段 ────────────────────────────────────────
+
+    async def _phase1_core_deps(self):
+        """Phase 1: 核心依赖注入"""
         inj = self._injected
-
-        # 1. 抽象层（必须注入，无默认实现）
         self.llm_provider = inj["llm_provider"]
         self.context_provider = inj["context_provider"]
         if not self.llm_provider or not self.context_provider:
             raise RuntimeError("必须提供 llm_provider 和 context_provider")
 
-        # 2. 每类数据库独立文件 + 独立 schema 版本
-        diaries_db = str(self.data_dir / "diaries.db")
-        conversations_db = str(self.data_dir / "conversations.db")
-        graph_db = str(self.data_dir / "graph.db")
-        state_db = str(self.data_dir / "state.db")
+    async def _phase2_db_migration(self):
+        """Phase 2: 数据库迁移（每个 DB 独立版本）"""
         for path, scope in [
-            (db_path, "memory"),
-            (diaries_db, "diaries"),
-            (conversations_db, "conversations"),
-            (graph_db, "graph"),
-            (state_db, "state"),
+            (self._db_path, "memory"),
+            (self._diaries_db, "diaries"),
+            (self._conversations_db, "conversations"),
+            (self._graph_db, "graph"),
+            (self._state_db, "state"),
         ]:
             try:
                 migration = DBMigration(path, scope=scope)
                 await migration.initialize()
                 await migration.migrate()
             except Exception as e:
-                logger.warning(f"[Memoria] {scope} 数据库迁移失败: {e}")
+                logger.warning(f"[Memoria] 数据库迁移失败 ({scope}): {e}")
         logger.info("[Memoria] 数据库迁移完成")
 
-        # 3. 存储层 — 每个 Store 使用独立的数据库文件
-        self.atom_store = inj["atom_store"] or AtomStore(db_path)
-        self.diary_store = inj["diary_store"] or DiaryStore(diaries_db)
+    async def _phase3_stores(self):
+        """Phase 3: 存储层初始化"""
+        inj = self._injected
+        self.atom_store = inj["atom_store"] or AtomStore(self._db_path)
+        self.diary_store = inj["diary_store"] or DiaryStore(self._diaries_db)
         self.persona_store = inj["persona_store"] or PersonaStore(str(self.data_dir))
-        self.state_store = inj["state_store"] or StateStore(state_db)
-        self.graph_store = inj["graph_store"] or GraphStore(graph_db)
-        self.conversation_store = inj["conversation_store"] or ConversationStore(conversations_db)
-        self.write_op_log = inj["write_op_log"] or WriteOpLog(db_path)
+        self.state_store = inj["state_store"] or StateStore(self._state_db)
+        self.graph_store = inj["graph_store"] or GraphStore(self._graph_db)
+        self.conversation_store = inj["conversation_store"] or ConversationStore(self._conversations_db)
+        self.write_op_log = inj["write_op_log"] or WriteOpLog(self._db_path)
 
-        # 并行初始化存储层
-        init_tasks = [
+        results = await asyncio.gather(
             self.atom_store.initialize(),
             self.diary_store.initialize(),
             self.state_store.initialize(),
             self.graph_store.initialize(),
             self.conversation_store.initialize(),
             self.write_op_log.initialize(),
-        ]
-        await asyncio.gather(*init_tasks, return_exceptions=True)
-        for i, task in enumerate(init_tasks):
-            if isinstance(task, Exception):
-                store_name = ["atom_store", "diary_store", "state_store", "graph_store", "conversation_store", "write_op_log"][i]
-                logger.warning(f"[Memoria] {store_name} 初始化异常: {task}")
+            return_exceptions=True,
+        )
+        names = ["atom_store", "diary_store", "state_store", "graph_store", "conversation_store", "write_op_log"]
+        for name, result in zip(names, results):
+            if isinstance(result, Exception):
+                logger.warning(f"[Memoria] {name} 初始化异常: {result}")
 
-        # 从 WAL 恢复热缓存（进程崩溃不丢对话）
+    async def _phase4_data_recovery(self):
+        """Phase 4: 数据恢复 + 旧数据迁移"""
+        # WAL 恢复
         try:
             restored = self.hot_cache.restore_from_wal()
             if restored:
@@ -206,13 +223,13 @@ class MemoryCore:
         except Exception as e:
             logger.warning(f"[Memoria] HotCache WAL 恢复失败: {e}")
 
-        # 启动时修复未完成的写操作
+        # 写操作日志修复
         try:
             await self.write_op_log.repair_on_startup()
         except Exception as e:
             logger.warning(f"[Memoria] 写操作日志修复失败: {e}")
 
-        # 初始化 bot 身份
+        # Bot 身份
         if self.atom_store:
             try:
                 bot_name = self.config.get("bot_name", "Hana")
@@ -220,56 +237,50 @@ class MemoryCore:
             except Exception as e:
                 logger.warning(f"[Memoria] 初始化 bot 身份失败: {e}")
 
-        # 一次性的旧数据迁移：从旧单库 memory.db 分拆到各独立数据库
+        # 旧数据迁移（memory.db → 分库）
         try:
-            await self._maybe_copy_legacy_data(db_path)
+            await self._maybe_copy_legacy_data(self._db_path)
         except Exception as e:
             logger.warning(f"[Memoria] 旧数据迁移异常: {e}")
 
-        # 索引一致性检查
-        task = asyncio.ensure_future(self._async_index_check(db_path))
+        # 索引检查（后台）
+        task = asyncio.ensure_future(self._async_index_check(self._db_path))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-        # 4. 图谱引擎
+    def _phase5_graph_engine(self):
+        """Phase 5: 图谱引擎（通过 IUserIdentityResolver 解耦）"""
+        from ..core.adapters import CoreUserIdentityResolver
+        resolver = CoreUserIdentityResolver(self.atom_store)
         self.graph_engine = GraphEngine(
             graph_store=self.graph_store,
-            atom_store=self.atom_store,
             diary_store=self.diary_store,
             config=self.config,
             embed_provider=self.embed_provider,
+            user_identity_resolver=resolver,
         )
 
-        # 后台图谱任务
-        try:
-            co_task = asyncio.ensure_future(self._cooccur_loop())
-            self._background_tasks.add(co_task)
-            co_task.add_done_callback(self._background_tasks.discard)
-
-            # HotCache → DB 定时刷写（每小时一次）
-            flush_task = asyncio.ensure_future(self._hotcache_flush_loop())
-            self._background_tasks.add(flush_task)
-            flush_task.add_done_callback(self._background_tasks.discard)
-        except Exception as e:
-            logger.warning(f"[Memoria] 后台任务注册失败: {e}")
-
-        # 5a. 存储门面（将 3 个 store 合并为一个 MemoryUnitOfWork）
+    async def _phase6_business_modules(self):
+        """Phase 6: 业务逻辑模块装配"""
+        # 存储门面
         self._memory_uow = MemoryUnitOfWork(
             diary_store=self.diary_store,
             atom_store=self.atom_store,
             write_op_log=self.write_op_log,
         )
 
-        # 5b. 核心业务模块
+        # Capturer
         self.capturer = Capturer(
             llm_provider=self.llm_provider,
             store=self._memory_uow,
-            prompts_dir=prompts_dir,
+            prompts_dir=self._prompts_dir,
             config=self.config,
             on_atoms_created=self.graph_engine.index_diary,
             embed_provider=self.embed_provider,
         )
-        # 5c. 记忆生命周期管理器（去重/衰减/归档/清理）
+
+        # 生命周期管理器
+        self.lifecycle = None
         try:
             from ..lifecycle import LifecycleManager
             self.lifecycle = LifecycleManager(
@@ -285,29 +296,25 @@ class MemoryCore:
                     "orphan_importance_threshold": self.config.get("orphan_importance_threshold", 0.2),
                 },
             )
-            # 注入到 Capturer
             self.capturer.lifecycle = self.lifecycle
-            # 启动后台生命周期循环
-            lc_task = asyncio.ensure_future(self._lifecycle_loops())
-            self._background_tasks.add(lc_task)
-            lc_task.add_done_callback(self._background_tasks.discard)
+
             # 启动时清理孤立原子
             try:
                 cleaned = await self.lifecycle.cleanup.cleanup_orphans()
                 if cleaned > 0:
                     logger.info(f"[Memoria] 启动时清理了 {cleaned} 条孤立原子")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[Memoria] 启动孤立原子清理失败: {e}")
         except Exception as e:
             logger.warning(f"[Memoria] 生命周期管理器初始化失败: {e}")
-            self.lifecycle = None
 
+        # Persona / Retriever / Injector
         self.persona_engine = PersonaEngine(
             llm_provider=self.llm_provider,
             atom_store=self.atom_store,
             diary_store=self.diary_store,
             capturer=self.capturer,
-            prompts_dir=prompts_dir,
+            prompts_dir=self._prompts_dir,
             config=self.config,
         )
         self.retriever = Retriever(
@@ -322,7 +329,9 @@ class MemoryCore:
         )
         self.injector = MemoryInjector(self.config)
 
-        # 6. 后台暖处理队列
+    async def _phase7_background_processing(self):
+        """Phase 7: 后台处理队列 + 定时循环"""
+        # 暖处理队列
         self.warm_processor = WarmProcessor(
             capturer=self.capturer,
             graph_engine=self.graph_engine,
@@ -331,7 +340,24 @@ class MemoryCore:
         )
         await self.warm_processor.start()
 
-        # 7. 调度器
+        # 定时循环（各自独立 try，一个失败不影响其他）
+        loops = [
+            ("co_occur", self._cooccur_loop()),
+            ("hotcache_flush", self._hotcache_flush_loop()),
+        ]
+        if self.lifecycle:
+            loops.append(("lifecycle", self._lifecycle_loops()))
+
+        for name, coro in loops:
+            try:
+                task = asyncio.ensure_future(coro)
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except Exception as e:
+                logger.warning(f"[Memoria] {name} 定时循环注册失败: {e}")
+
+    async def _phase8_scheduler(self):
+        """Phase 8: 调度器 + 指令处理器"""
         self.consolidation_manager = ConsolidationManager(
             state_store=self.state_store,
             warm_processor=self.warm_processor,
@@ -339,7 +365,6 @@ class MemoryCore:
         )
         await self.consolidation_manager.initialize()
 
-        # 8. 指令处理器
         self.command_handler = CommandHandler(
             diary_store=self.diary_store,
             atom_store=self.atom_store,
@@ -347,8 +372,6 @@ class MemoryCore:
             retriever=self.retriever,
             capturer=self.capturer,
         )
-
-        self._initialized = True
 
     async def set_page_api(self, page_api) -> None:
         """外部注入 WebUI API（不强制，不用也可以）"""

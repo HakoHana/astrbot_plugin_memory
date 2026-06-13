@@ -153,6 +153,20 @@ class LifecycleManager:
 
     # ── 统计 ─────────────────────────────────────────────
 
+    async def run_daily_semantic_dedup(self):
+        """每日语义去重（状态机接入前暂放于此）
+
+        状态机接入后由此接口转交梦境状态机调度。
+        """
+        if not self._embed_provider:
+            return
+        try:
+            marked = await self.dedup.scan_semantic_duplicates()
+            if marked:
+                logger.info(f"[Lifecycle] 语义去重完成: {marked} 条标记为 dormant")
+        except Exception as e:
+            logger.warning(f"[Lifecycle] 语义去重异常: {e}")
+
     async def get_stats(self, user_id: str | None = None) -> dict:
         """生命周期统计"""
         result = {}

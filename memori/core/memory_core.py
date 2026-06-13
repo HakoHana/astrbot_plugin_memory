@@ -430,6 +430,7 @@ class MemoryCore:
                 await self.lifecycle.run_daily_decay()
                 await self.lifecycle.run_daily_archive()
                 await self.lifecycle.run_daily_cleanup()
+                await self.lifecycle.run_daily_semantic_dedup()
             except asyncio.CancelledError:
                 break
             except Exception as e:

@@ -234,7 +234,9 @@ class Capturer(ICapturer):
         """异步计算并持久化原子 embedding
 
         Capture 流程的异步后处理步骤，不阻塞主流程。
-        仅在 embed_provider 配置时自动执行。写入 embedding 后接语义去重。
+        仅在 embed_provider 配置时自动执行。
+
+        语义去重由梦境界面定时扫描全库完成，此处不重复做。
         """
         if not self.embed_provider or not atoms:
             return
@@ -252,9 +254,6 @@ class Capturer(ICapturer):
                 f"[Capturer] 已计算 {len(embeddings)} 条原子 embedding "
                 f"(model={model_name}, dim={len(embeddings[0]) if embeddings else 0})"
             )
-            # 第二道防线：语义去重（余弦相似度）
-            if self.lifecycle:
-                await self.lifecycle.semantic_dedup(atoms, model_name)
         except Exception as e:
             logger.warning(f"[Capturer] 计算 embedding 失败: {e}")
 

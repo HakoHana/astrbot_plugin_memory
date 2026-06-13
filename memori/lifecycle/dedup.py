@@ -203,7 +203,7 @@ class DedupEngine:
     ):
         """语义去重：检查新原子是否与已有原子语义重复
 
-        在 _compute_embeddings 末尾异步执行。
+        供 Capturer/Call 调用（单批新原子 vs 已有库）。
         重复特征：余弦 > threshold → 标记新原子 dormant，强化旧原子。
         """
         threshold = threshold if threshold is not None else self._semantic_threshold
@@ -217,7 +217,6 @@ class DedupEngine:
             if q_norm < 1e-10:
                 continue
 
-            # 加载该用户有 embedding 的活跃原子（排除自己）
             try:
                 rows = await self.atom_store.fetch(
                     "SELECT id, embedding, importance FROM memory_atoms "
@@ -247,7 +246,6 @@ class DedupEngine:
                 sim = dot / (q_norm * n_norm)
 
                 if sim > threshold:
-                    # 标记新原子为 dormant
                     try:
                         await self.atom_store.execute(
                             "UPDATE memory_atoms SET status=? WHERE id=?",
@@ -255,7 +253,6 @@ class DedupEngine:
                         )
                     except Exception:
                         pass
-                    # 强化旧原子（步长递减）
                     step = max(0.01, 0.05 / math.log2(max(e_imp or 0, 1) + 1))
                     try:
                         await self.atom_store.execute(
@@ -267,5 +264,87 @@ class DedupEngine:
                         pass
                     break
 
+    async def scan_semantic_duplicates(
+        self,
+        threshold: float | None = None,
+        max_per_user: int = 300,
+    ):
+        """全库扫描语义重复 — 供梦境/每日定时调用
+
+        逐用户扫描有 embedding 的活跃原子，按重要度排序，
+        依次两两比较余弦相似度，超阈值则标记后者为 dormant。
+
+        状态机接入后，由此接口接入梦境状态机调度。
+        """
+        threshold = threshold if threshold is not None else self._semantic_threshold
+
+        try:
+            users = await self.atom_store.fetch(
+                "SELECT DISTINCT user_id FROM memory_atoms "
+                "WHERE status='active' AND embedding IS NOT NULL"
+            )
+        except Exception:
+            return 0
+
+        total_marked = 0
+        for (uid,) in users:
+            try:
+                rows = await self.atom_store.fetch(
+                    "SELECT id, embedding, importance FROM memory_atoms "
+                    "WHERE user_id=? AND status='active' AND embedding IS NOT NULL "
+                    "ORDER BY importance DESC LIMIT ?",
+                    (uid, max_per_user),
+                )
+            except Exception:
+                continue
+
+            if len(rows) < 2:
+                continue
+
+            items = []
+            for row in rows:
+                eid, e_blob, e_imp = row
+                if not e_blob:
+                    continue
+                try:
+                    emb = json.loads(e_blob.decode("utf-8"))
+                except Exception:
+                    continue
+                items.append((eid, emb, e_imp))
+
+            for i in range(min(100, len(items))):
+                eid_a, emb_a, imp_a = items[i]
+                norm_a = sum(x * x for x in emb_a) ** 0.5
+                if norm_a < 1e-10:
+                    continue
+                for j in range(i + 1, len(items)):
+                    eid_b, emb_b, imp_b = items[j]
+                    if len(emb_a) != len(emb_b):
+                        continue
+                    norm_b = sum(x * x for x in emb_b) ** 0.5
+                    if norm_b < 1e-10:
+                        continue
+                    sim = sum(a * b for a, b in zip(emb_a, emb_b)) / (norm_a * norm_b)
+                    if sim > threshold:
+                        if imp_a >= imp_b:
+                            target_id, winner_id = eid_b, eid_a
+                        else:
+                            target_id, winner_id = eid_a, eid_b
+                        try:
+                            await self.atom_store.execute(
+                                "UPDATE memory_atoms SET status=? WHERE id=?",
+                                (AtomStatus.DORMANT.value, target_id),
+                            )
+                            total_marked += 1
+                            step = max(0.01, 0.05 / math.log2(max(max(imp_a, imp_b), 1) + 1))
+                            await self.atom_store.execute(
+                                "UPDATE memory_atoms SET importance=MIN(0.95, importance+?), "
+                                "access_count=access_count+1 WHERE id=?",
+                                (step, winner_id),
+                            )
+                        except Exception:
+                            pass
+                        break
+        return total_marked
     # ── 批量增强：给多个原子调权重（供 warm_processor 提前去重返回后用） ──
     # （不额外新增，父调用直接走 dedup_and_reinforce 即可）

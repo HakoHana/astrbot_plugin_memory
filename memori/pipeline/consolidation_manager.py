@@ -1,8 +1,9 @@
-"""调度器 + 会话状态管理器 — 水位线 + 空闲超时双触发，重量操作委托 WarmProcessor
+"""调度器 + 会话状态管理器 — 按 bot 参与轮数触发，重量操作委托 WarmProcessor
 
 触发器设计：
-A. 热缓存水位线 — 用户热缓存消息数达到阈值 → 立刻触发
-B. 空闲超时 — 用户超过 N 分钟无活动 → 扫描未整理内容兜底整理
+A. 对话轮数 — bot 回复后累计一轮，达到阈值触发整理（主触发）
+B. 空闲超时 — 用户超过 N 分钟无活动 → 扫描未整理内容兜底整理（安全网）
+C. 定时扫描 — 周期检查积压，防止疏漏（安全网）
 
 全局限速防止多个用户同时触发挤爆 LLM 队列。
 """
@@ -25,12 +26,10 @@ class ConsolidationManager(IConsolidationManager):
     调度器 + 会话状态管理器
 
     职责（轻量）：
-    - 消息计数 & 去抖
-    - 水位线触发（来自 HotCache 回调）
+    - 对话轮数计数（只在 bot 回复后累加）
     - 空闲超时兜底
     - 全局限速 + 用户级限速
     - 会话状态持久化（延迟刷写）
-    - 空闲超时兜底
 
     重量操作（LLM 调用、DB 写入）委托给 WarmProcessor 异步队列。
     """
@@ -48,10 +47,10 @@ class ConsolidationManager(IConsolidationManager):
         self.config = config or {}
 
         # 配置
+        self._round_threshold = self.config.get("consolidation_rounds", 5)  # 每 N 轮 bot 对话触发一次
         self.idle_timeout_minutes = self.config.get("idle_timeout_minutes", 60)
         self._scan_interval_minutes = self.config.get("scan_interval_minutes", 120)
         self._min_global_interval = self.config.get("min_global_interval", 120)
-        # 用户级速率（独立于全局限速，防同用户刷屏重复触发）
         self._min_user_interval = self.config.get("min_user_interval", 60)
 
         # 会话状态（内存中，延迟写回）
@@ -65,10 +64,10 @@ class ConsolidationManager(IConsolidationManager):
         self._idle_check_interval: float = 60.0
         self._last_activity: dict[str, float] = {}
 
-        # 定时扫描（不管用户是否活跃，周期扫积压）
+        # 定时扫描
         self._periodic_scan_task: asyncio.Task | None = None
 
-        # 去抖
+        # 去抖（限速间隔内不重复触发）
         self._debounce_interval: float = 10.0
         self._last_trigger_check: dict[str, float] = {}
         self._pending_counts: dict[str, int] = {}
@@ -76,14 +75,10 @@ class ConsolidationManager(IConsolidationManager):
         # 全局限速
         self._global_last_consolidation: float = 0.0
 
-        # 用户级限速（独立于全局限速）
+        # 用户级限速
         self._last_user_consolidation: dict[str, float] = {}
 
         self._destroyed = False
-
-        # 注册为 HotCache 水位线回调
-        if self.hot_cache:
-            self.hot_cache.set_water_callback(self._on_water_trigger)
 
     async def initialize(self):
         """从数据库恢复所有会话状态"""
@@ -117,19 +112,28 @@ class ConsolidationManager(IConsolidationManager):
         self._dirty_users.clear()
 
     # ═══════════════════════════════════════════════════
-    #  A. 水位线触发（由 HotCache 回调）
+    #  A. 主触发：on_round_complete（bot 回复后调用）
     # ═══════════════════════════════════════════════════
 
-    def _on_water_trigger(self, user_id: str):
-        """HotCache 水位线到顶时回调此方法"""
+    async def on_round_complete(self, user_id: str, conversation_text: str = ""):
+        """Bot 完成一轮对话后调用，累计轮数并在达到阈值时触发整理
+
+        Args:
+            user_id: 用户 ID
+            conversation_text: 本轮对话文本（热缓存自动获取，可不传）
+        """
         if self._destroyed:
             return
-        # 异步执行，不阻塞 HotCache.push()
-        task = asyncio.ensure_future(self._handle_water_trigger(user_id))
-        task.add_done_callback(lambda t: None)
 
-    async def _handle_water_trigger(self, user_id: str):
-        """异步处理水位触发"""
+        state = self._get_or_create_state(user_id)
+        state.msg_count += 1  # 每轮 +1
+        self._last_activity[user_id] = time.time()
+        self._mark_dirty(user_id)
+
+        # 检查是否达到触发阈值
+        if state.msg_count < self._round_threshold:
+            return
+
         # 用户级限速
         now = time.time()
         last_user = self._last_user_consolidation.get(user_id, 0.0)
@@ -142,64 +146,36 @@ class ConsolidationManager(IConsolidationManager):
             logger.debug(f"[Memory] 全局限速: 距上次 {now - self._global_last_consolidation:.0f}s")
             return
 
-        # 取热缓存最近的对话上下文作为整理素材（用户 + Bot 双向消息）
-        conversation_text = self._get_hot_context(user_id)
-
-        state = self._get_or_create_state(user_id)
-        logger.info(f"[Memory] 水位线触发整理: uid={user_id}")
+        conv_text = conversation_text or self._get_hot_context(user_id)
+        logger.info(f"[Memory] 对话轮数触发整理: uid={user_id}, rounds={state.msg_count}")
         if self.warm_processor:
-            await self.warm_processor.enqueue(user_id, conversation_text, state, on_done=self._after_consolidation)
+            await self.warm_processor.enqueue(user_id, conv_text, state, on_done=self._after_consolidation)
 
     # ═══════════════════════════════════════════════════
-    #  B. on_message（AstrBot 每条消息调一次）
+    #  on_message（AstrBot 每条消息调一次，仅用于更新最后活动时间）
     # ═══════════════════════════════════════════════════
 
     async def on_message(self, user_id: str, conversation_text: str, sender_name: str = ""):
-        """
-        每次有消息到来时的入口。
+        """每次有消息到来时的入口（仅更新活动时间，不计数）
 
-        职责（轻量）：
-        - 计数（用于空闲超时判断是否有新内容）
-        - 去抖
-        - 记录 last_activity（空闲超时用）
-
-        水位线触发由 HotCache.push() 直接回调，不经由此方法。
+        Args:
+            user_id: 用户 ID
+            conversation_text: 消息内容（仅记录活动用）
+            sender_name: 发送者昵称
         """
         if self._destroyed:
             return
-
-        # 1. 内存计数（零 SQLite 开销）
-        self._pending_counts[user_id] = self._pending_counts.get(user_id, 0) + 1
         self._last_activity[user_id] = time.time()
-
-        # 2. 去抖：10 秒内不重复刷状态
-        now = time.time()
-        last_check = self._last_trigger_check.get(user_id, 0.0)
-        if now - last_check < self._debounce_interval:
-            return
-        self._last_trigger_check[user_id] = now
-
-        # 3. 内存计数 → 刷入持久状态
-        state = self._get_or_create_state(user_id)
-        state.msg_count += self._pending_counts.pop(user_id, 0)
-        self._mark_dirty(user_id)
 
     # ═══════════════════════════════════════════════════
     #  整理完成回调
     # ═══════════════════════════════════════════════════
 
     async def _after_consolidation(self, user_id: str, result):
-        """整理后的收尾工作 — 状态重置 + 解除水位线"""
+        """整理完成后的收尾"""
         now = time.time()
         self._global_last_consolidation = now
         self._last_user_consolidation[user_id] = now
-
-        # 重置水位线，允许下次满水位再次触发
-        if self.hot_cache:
-            try:
-                self.hot_cache.reset_water_level(user_id)
-            except Exception:
-                pass
 
         state = self._get_or_create_state(user_id)
         state.reset_after_consolidation()
@@ -236,7 +212,7 @@ class ConsolidationManager(IConsolidationManager):
                     self._dirty_users.add(uid)
 
     # ═══════════════════════════════════════════════════
-    #  空闲超时（兜底）
+    #  B. 空闲超时兜底
     # ═══════════════════════════════════════════════════
 
     async def _idle_check_loop(self):
@@ -255,15 +231,7 @@ class ConsolidationManager(IConsolidationManager):
                     if not state:
                         continue
 
-                    # 检查是否有未整理的新消息
-                    pending = self._pending_counts.pop(uid, 0)
-                    has_content = (state.msg_count + pending) > 0
-
-                    if pending:
-                        state.msg_count += pending
-                        self._mark_dirty(uid)
-
-                    if not has_content:
+                    if state.msg_count <= 0:
                         continue
 
                     # 用户级限速
@@ -285,15 +253,11 @@ class ConsolidationManager(IConsolidationManager):
                 pass
 
     # ═══════════════════════════════════════════════════
-    #  C. 定时扫描（不管活跃状态，周期扫积压）
+    #  C. 定时扫描（安全网）
     # ═══════════════════════════════════════════════════
 
     async def _periodic_scan_loop(self):
-        """定时扫描：每 scan_interval_minutes 扫一遍所有用户
-
-        不管用户是否活跃，只要距上次整理超过 scan_interval 且有积压内容
-        （包括未到水位线的和因限速被跳过的），就触发整理。
-        """
+        """定时扫描：每 scan_interval_minutes 扫一遍所有用户"""
         interval_sec = self._scan_interval_minutes * 60
         while not self._destroyed:
             try:
@@ -304,15 +268,8 @@ class ConsolidationManager(IConsolidationManager):
                 for uid, state in list(self._states.items()):
                     if self._destroyed:
                         return
-                    # 距上次整理不足一个周期则跳过
                     if now - state.last_consolidated_at < interval_sec:
                         continue
-                    # 合并 pending 计数到 state
-                    pending = self._pending_counts.pop(uid, 0)
-                    if pending:
-                        state.msg_count += pending
-                        self._mark_dirty(uid)
-                    # 没有积压内容则跳过
                     if state.msg_count <= 0:
                         continue
                     # 用户级限速
@@ -344,13 +301,10 @@ class ConsolidationManager(IConsolidationManager):
         return self._states.get(user_id)
 
     def set_warm_processor(self, warm_processor: IWarmProcessor):
-        """注入 WarmProcessor（初始化顺序解耦）"""
         self.warm_processor = warm_processor
 
     def set_hot_cache(self, hot_cache: IHotMessageCache):
-        """注入 HotCache（初始化顺序解耦）"""
         self.hot_cache = hot_cache
-        self.hot_cache.set_water_callback(self._on_water_trigger)
 
     # ── 辅助 ──
 
@@ -365,6 +319,8 @@ class ConsolidationManager(IConsolidationManager):
 
     def update_config(self, config: dict[str, Any]):
         """热更新配置"""
+        if "consolidation_rounds" in config:
+            self._round_threshold = int(config["consolidation_rounds"])
         self.idle_timeout_minutes = config.get("idle_timeout_minutes", self.idle_timeout_minutes)
         self._scan_interval_minutes = config.get("scan_interval_minutes", self._scan_interval_minutes)
         self._min_global_interval = config.get("min_global_interval", self._min_global_interval)

@@ -1,9 +1,9 @@
 """热消息缓存 — 内存 deque + WAL（Write-Ahead Log），每用户最近 N 条消息
 
-架构：
-- 热缓存是记忆提取的 source of truth（主数据源）
-- conversations.db 只做冷备份 + 跨会话检索
-- 每条消息先写入此缓存 + WAL 文件，达到阈值或定时才批量刷入 DB
+定位：
+- 纯环形消息缓冲区，所有消息都进，满则丢弃旧消息
+- 不触发任何整理操作，触点完全由外部控制
+- conversations.db 做冷备份 + 跨会话检索
 
 持久化保障（类似 Redis AOF）：
 - 每条消息同时写入 {wal_dir}/{user_id}.wal（JSON Lines）
@@ -28,35 +28,20 @@ from .logger import logger
 
 
 class HotMessageCache(IHotMessageCache):
-    """每个用户的热消息缓存
+    """每个用户的热消息缓存（纯环形缓冲区，无触发逻辑）
 
-    在 main.py 入口处写入（user + assistant 双向），
     Retriever.get_recent_context 直接从此读取（零 SQL 开销）。
-
     WAL 文件做崩溃恢复，flushed 标记防止重复刷写。
-
-    水位线触发：
-    - push() 后检查该用户缓存数 >= water_level 且未触发过 → 调 callback
-    - callback 通常是 ConsolidationManager 的触发入口
-    - 整理完成后由外部调 reset_water_level() 解除标记
     """
 
     def __init__(self, data_dir: str = "", config: dict | None = None):
         config = config or {}
         self._max_per_user: int = config.get("hotcache_max_per_user", 50)
-        self._water_level: int = config.get("hotcache_water_level", 40)
-        # 水位线不能超过缓存上限
-        if self._water_level > self._max_per_user:
-            self._water_level = self._max_per_user
 
         self._caches: dict[str, deque[dict[str, Any]]] = {}
         self._wal_dir = Path(data_dir) / "hotcache" if data_dir else None
         if self._wal_dir:
             self._wal_dir.mkdir(parents=True, exist_ok=True)
-
-        # 水位线触发
-        self._water_fired: set[str] = set()  # 当前水位已触发过的用户
-        self._water_callback = None  # callback(user_id) -> None
 
     # ═══════════════════════════════════════════════════
     #  启动恢复
@@ -120,12 +105,6 @@ class HotMessageCache(IHotMessageCache):
         # WAL：追加写入（类 Redis AOF，每条消息持久化）
         self._append_wal(user_id, msg)
 
-        # 水位线检查：达到水位且未触发过 → 回调
-        if self._water_callback and len(self._caches[user_id]) >= self._water_level:
-            if user_id not in self._water_fired:
-                self._water_fired.add(user_id)
-                self._water_callback(user_id)
-
     def _append_wal(self, user_id: str, msg: dict):
         """追加一条记录到 WAL 文件"""
         if not self._wal_dir:
@@ -133,7 +112,6 @@ class HotMessageCache(IHotMessageCache):
         try:
             wal_path = self._wal_dir / f"{user_id}.wal"
             with open(wal_path, "a", encoding="utf-8") as f:
-                # 不写 flushed=False 以节省空间，启动恢复时默认 False
                 slim = {k: v for k, v in msg.items() if k != "flushed"}
                 f.write(json.dumps(slim, ensure_ascii=False) + "\n")
         except Exception as exc:
@@ -211,7 +189,6 @@ class HotMessageCache(IHotMessageCache):
             count = await conversation_store.batch_add_messages(to_flush)
             for item in to_flush:
                 item["_msg_ref"]["flushed"] = True
-            # 裁剪 WAL：已刷写的条目不再保留
             self._compact_wal(users_with_unflushed)
             return count
         except Exception:
@@ -234,13 +211,11 @@ class HotMessageCache(IHotMessageCache):
                 continue
             unflushed = [m for m in msgs if not m.get("flushed")]
             if not unflushed:
-                # 全部已刷写，删文件
                 try:
                     wal_path.unlink(missing_ok=True)
                 except Exception:
                     pass
             else:
-                # 只保留未刷写的
                 try:
                     lines = "\n".join(
                         json.dumps({k: v for k, v in m.items() if k != "flushed"},
@@ -255,35 +230,16 @@ class HotMessageCache(IHotMessageCache):
     #  管理
     # ═══════════════════════════════════════════════════
 
-    def set_water_callback(self, callback):
-        """注册水位线回调，缓存满时调用 callback(user_id)"""
-        self._water_callback = callback
-
-    def reset_water_level(self, user_id: str):
-        """整理完成后重置用户的水位线标记，允许再次触发"""
-        self._water_fired.discard(user_id)
-
     def update_config(self, config: dict):
-        """热更新缓存配置
-
-        支持：
-        - hotcache_max_per_user: 每用户最大缓存条数
-        - hotcache_water_level: 水位线
-        """
+        """热更新缓存配置（仅支持 hotcache_max_per_user）"""
         max_val = config.get("hotcache_max_per_user")
         if max_val is not None and max_val > 0:
             self._max_per_user = int(max_val)
-        wl = config.get("hotcache_water_level")
-        if wl is not None and wl > 0:
-            self._water_level = int(wl)
-        if self._water_level > self._max_per_user:
-            self._water_level = self._max_per_user
 
     def clear(self, user_id: str | None = None):
         """清空缓存（同时清除 WAL 文件）"""
         if user_id:
             self._caches.pop(user_id, None)
-            self._water_fired.discard(user_id)
             if self._wal_dir:
                 try:
                     (self._wal_dir / f"{user_id}.wal").unlink(missing_ok=True)
@@ -291,7 +247,6 @@ class HotMessageCache(IHotMessageCache):
                     pass
         else:
             self._caches.clear()
-            self._water_fired.clear()
             if self._wal_dir and self._wal_dir.exists():
                 import shutil
                 shutil.rmtree(self._wal_dir, ignore_errors=True)

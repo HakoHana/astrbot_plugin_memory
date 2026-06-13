@@ -229,18 +229,33 @@ class MemoriPlugin(Star):
             if not uid or not txt or txt.startswith("/"):
                 return
 
-            # 从热缓存读最近对话（零 SQL，source of truth）
+            # 1. 推入热缓存（纯缓冲区，供召回快速读取）
             hc = self.core.hot_cache
-            full_ctx = txt
             if hc:
                 try:
-                    bot_name = self.config.get("bot_name", "Hana")
-                    full_ctx = hc.format_recent_context(uid, limit=10, bot_name=bot_name) or txt
+                    sid = await self.core.conversation_store.get_session_id(event)
+                    hc.push(
+                        user_id=uid, role="user", content=txt,
+                        sender_name=sender_name, session_id=sid,
+                    )
                 except Exception:
                     pass
 
+            # 2. 写入 conversations.db（持久化）
+            if self.core.conversation_store:
+                try:
+                    await self.core.conversation_store.add_message(
+                        session_id=event.unified_msg_origin,
+                        user_id=uid,
+                        role="user",
+                        content=txt,
+                    )
+                except Exception:
+                    pass
+
+            # 3. 更新活动时间（供空闲超时使用）
             task = asyncio.ensure_future(
-                self.core.consolidation_manager.on_message(uid, full_ctx, sender_name)
+                self.core.consolidation_manager.on_message(uid, txt, sender_name)
             )
             self.core._background_tasks.add(task)
             task.add_done_callback(self.core._background_tasks.discard)
@@ -267,6 +282,25 @@ class MemoriPlugin(Star):
                         user_id=uid, role="assistant", content=resp_text,
                         sender_name=bot_name, session_id=sid,
                     )
+
+                    # 写入 conversations.db
+                    if self.core.conversation_store:
+                        try:
+                            await self.core.conversation_store.add_message(
+                                session_id=event.unified_msg_origin,
+                                user_id=uid,
+                                role="assistant",
+                                content=resp_text,
+                            )
+                        except Exception:
+                            pass
+
+                    # 累计一轮对话 → 可能触发整理
+                    try:
+                        hot_ctx = hc.format_recent_context(uid, limit=10, bot_name=bot_name)
+                        await self.core.consolidation_manager.on_round_complete(uid, hot_ctx)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"[memori] on_response 出错: {e}")
 

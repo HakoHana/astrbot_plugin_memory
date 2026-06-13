@@ -269,7 +269,12 @@ class IConsolidationManager(ABC):
     async def on_message(
         self, user_id: str, conversation_text: str, sender_name: str = ""
     ):
-        """消息入口：计数 → 判断触发 → 入队"""
+        """消息入口：仅更新活动时间，不计数"""
+        ...
+
+    @abstractmethod
+    async def on_round_complete(self, user_id: str, conversation_text: str = ""):
+        """Bot 完成一轮对话后调用：累计轮数 → 达阈值触发整理"""
         ...
 
     @abstractmethod
@@ -341,18 +346,8 @@ class IHotMessageCache(ABC):
         ...
 
     @abstractmethod
-    def set_water_callback(self, callback):
-        """注册水位线回调，缓存满时调用 callback(user_id)"""
-        ...
-
-    @abstractmethod
-    def reset_water_level(self, user_id: str):
-        """整理完成后重置用户的水位线标记，允许再次触发"""
-        ...
-
-    @abstractmethod
     def update_config(self, config: dict):
-        """热更新缓存配置（max_per_user, water_level）"""
+        """热更新缓存配置（max_per_user）"""
         ...
 
     @abstractmethod

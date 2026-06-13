@@ -33,7 +33,7 @@ VERSIONS: dict[str, int] = {
     "memory": 3,         # v1→v3：memory_atoms 列补齐 + 索引；v2 已迁至 conversations.db
     "diaries": 0,        # 由 DiaryStore.initialize() 统一建表
     "conversations": 0,  # 由 ConversationStore.initialize() 统一建表
-    "graph": 0,          # 由 GraphStore.initialize() 统一建表
+    "graph": 1,          # v1：ISO 字符串 → epoch float 统一
     "state": 0,          # 由 StateStore.initialize() 统一建表
 }
 
@@ -445,3 +445,28 @@ class DBMigration(BaseDbStore):
             """)
             await db.commit()
         logger.info("[Migration] v5 完成: 桥表 atoms_diary_links 已就绪")
+
+    async def _migrate_graph_v1(self):
+        """v1: 图谱时间戳从 ISO 8601 字符串统一为 epoch float"""
+        from datetime import datetime
+
+        for table in ("nodes", "edges"):
+            try:
+                rows = await self.fetch(
+                    f"SELECT rowid, created_at, updated_at FROM {table} "
+                    "WHERE created_at LIKE '2%' OR created_at LIKE '1%'"
+                )
+                for row in rows:
+                    rid, ca, ua = row
+                    try:
+                        new_ca = str(datetime.fromisoformat(ca.replace("Z", "+00:00")).timestamp())
+                        new_ua = str(datetime.fromisoformat(ua.replace("Z", "+00:00")).timestamp())
+                        await self.execute(
+                            f"UPDATE {table} SET created_at=?, updated_at=? WHERE rowid=?",
+                            (new_ca, new_ua, rid),
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        logger.info("[Migration] graph v1 完成: 已转换 ISO 时间戳 → epoch float")

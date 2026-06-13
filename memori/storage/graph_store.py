@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 from ..models.graph_models import GraphNode, SocialEdge
@@ -76,7 +77,7 @@ class GraphStore(BaseDbStore):
 
         result: dict[str, str] = {}
         async with self._connect() as db:
-            now = self._now_iso()
+            now = self._now_ts()
             for node in nodes:
                 if not node.value or not node.value.strip():
                     continue
@@ -114,7 +115,7 @@ class GraphStore(BaseDbStore):
         blob = json.dumps(embedding).encode("utf-8")
         await self.execute(
             "UPDATE nodes SET embedding=?, embedding_model=?, updated_at=? WHERE id=?",
-            (blob, model_name, self._now_iso(), node_id),
+            (blob, model_name, self._now_ts(), node_id),
         )
 
     async def search_vector(
@@ -182,7 +183,7 @@ class GraphStore(BaseDbStore):
         confidence: float = 0.8,
     ) -> str | None:
         """添加边"""
-        now = self._now_iso()
+        now = self._now_ts()
         try:
             await self.execute("""
                 INSERT INTO edges
@@ -221,7 +222,7 @@ class GraphStore(BaseDbStore):
         Returns:
             更新后的 weight
         """
-        now = self._now_iso()
+        now = self._now_ts()
         src, tgt = (from_node, to_node) if from_node < to_node else (to_node, from_node)
         edge_key = f"{relation_type}:{src}:{tgt}"
 
@@ -267,7 +268,7 @@ class GraphStore(BaseDbStore):
 
     async def upsert_social_edge(self, edge: SocialEdge) -> SocialEdge | None:
         """创建或更新社交关系边"""
-        now = self._now_iso()
+        now = self._now_ts()
         eid = edge.edge_id
         meta = json.dumps({"cap": edge.cap, "source": edge.source,
                            "from_user": edge.from_user, "to_user": edge.to_user})
@@ -367,14 +368,14 @@ class GraphStore(BaseDbStore):
         """更新社交边权重"""
         await self.execute(
             "UPDATE edges SET weight = ?, updated_at = ? WHERE id = ?",
-            (weight, self._now_iso(), edge_id),
+            (weight, self._now_ts(), edge_id),
         )
 
     async def set_social_edge_status(self, edge_id: str, status: str):
         """设置社交边状态（confirm / reject / block）"""
         await self.execute(
             "UPDATE edges SET status = ?, updated_at = ? WHERE id = ?",
-            (status, self._now_iso(), edge_id),
+            (status, self._now_ts(), edge_id),
         )
 
     async def count_social_edges(self, user_id: str | None = None) -> int:
@@ -397,9 +398,24 @@ class GraphStore(BaseDbStore):
     # ── 辅助 ──────────────────────────────────────────
 
     @staticmethod
-    def _now_iso() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
+    def _now_ts() -> float:
+        """当前时间戳（Unix epoch float，与全系统一致）"""
+        return time.time()
+
+    @staticmethod
+    def _fmt_ts(ts: float | str) -> str:
+        """时间戳 → 可读字符串，兼容新旧两种格式"""
+        if isinstance(ts, (int, float)):
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+        if isinstance(ts, str):
+            # 旧 ISO 格式：解析后格式化
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(ts)
+                return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return ts[:19]
+        return str(ts)[:19]
 
     @staticmethod
     def _row_to_social_edge(row) -> SocialEdge | None:

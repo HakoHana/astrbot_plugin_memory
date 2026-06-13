@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from ..core.logger import logger
+from .context_formatter import fmt_ts
 
 
 class PageService:
@@ -131,7 +132,7 @@ class PageService:
                 items.append({
                     "id": r[0], "user_id": r[1], "date": r[2],
                     "importance": r[3], "sentiment": r[4], "topics": topics,
-                    "created_at": r[6],
+                    "created_at": fmt_ts(r[6]),
                 })
             return self._ok({"items": items, "total": total, "page": page, "size": size})
         except Exception as e:
@@ -147,6 +148,7 @@ class PageService:
                        "mood", "topics", "sentiment", "fact_extracted", "fact_retry_count",
                        "archived", "correction", "created_at"]
             diary = dict(zip(columns, row))
+            diary['created_at'] = fmt_ts(diary['created_at'])
             atoms = await self._db.fetch(
                 "SELECT a.id, a.content, a.atom_type, a.importance FROM memory_atoms a "
                 "JOIN atoms_diary_links d ON a.id = d.atom_id "
@@ -264,6 +266,7 @@ class PageService:
                        "mood", "topics", "sentiment", "fact_extracted", "fact_retry_count",
                        "archived", "correction", "created_at"]
             diary = dict(zip(columns, row))
+            diary['created_at'] = fmt_ts(diary['created_at'])
             atoms = await self._db.fetch(
                 "SELECT a.id, a.content, a.atom_type, a.importance FROM memory_atoms a "
                 "JOIN atoms_diary_links d ON a.id = d.atom_id "
@@ -377,7 +380,10 @@ class PageService:
                     "last_full_update", "last_incremental_update", "known_ids", "primary_name",
                     "identity_confidence", "incremental_count", "diary_count_since_full",
                     "created_at", "updated_at"]
-            return self._ok(dict(zip(cols, row)))
+            d = dict(zip(cols, row))
+            d["created_at"] = fmt_ts(d["created_at"])
+            d["updated_at"] = fmt_ts(d["updated_at"])
+            return self._ok(d)
         except Exception as e:
             return self._error(str(e))
 

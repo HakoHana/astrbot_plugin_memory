@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ..core.memory_core import MemoryCore
+from ..utils.context_formatter import fmt_ts
 from .deps import get_core, get_current_user, authorized_user, authorized_write
 from .schemas import *
 
@@ -615,7 +616,7 @@ async def get_pending_relations(
             "from_user": e.from_user,
             "relation_type": e.relation_type,
             "weight": e.weight,
-            "created_at": e.created_at,
+            "created_at": fmt_ts(e.created_at),
         })
     return {"ok": True, "pending": pending}
 

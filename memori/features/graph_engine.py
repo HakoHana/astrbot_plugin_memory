@@ -484,7 +484,7 @@ class GraphEngine(IGraphEngine):
                            "from_user": edge.from_user, "to_user": edge.to_user})
         await self.graph_store.execute(
             "UPDATE edges SET metadata = ?, updated_at = ? WHERE id = ?",
-            (meta, self.graph_store._now_iso(), edge.edge_id),
+            (meta, self.graph_store._now_ts(), edge.edge_id),
         )
 
         logger.info(f"[memori] {uid} 确认了 {claimer_uid} 的 {edge.relation_type} 关系")

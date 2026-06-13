@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from typing import Union
 
 
 def format_msg(
@@ -86,3 +87,22 @@ def format_date_tag(date_str: str, now: float | None = None) -> str:
         return "昨天"
     else:
         return dt.strftime("%m-%d")
+
+def fmt_ts(ts):
+    """将时间戳格式化为可读字符串，兼容 epoch float 和 ISO 字符串
+
+    Args:
+        ts: Unix epoch float（1781357803）或 ISO 字符串（2026-06-13T13:36:43）
+
+    Returns:
+        "2026-06-13 21:36:43" 格式
+    """
+    if isinstance(ts, (int, float)):
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+    if isinstance(ts, str):
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return ts[:19]
+    return str(ts)[:19]

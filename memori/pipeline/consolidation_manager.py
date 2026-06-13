@@ -80,6 +80,9 @@ class ConsolidationManager(IConsolidationManager):
         # 用户级限速
         self._last_user_consolidation: dict[str, float] = {}
 
+        # 每个用户最新的 session_id（供空闲/扫描查 DB）
+        self._last_session_id: dict[str, str] = {}
+
         self._destroyed = False
 
     async def initialize(self):
@@ -130,6 +133,8 @@ class ConsolidationManager(IConsolidationManager):
         state = self._get_or_create_state(user_id)
         state.msg_count += 1  # 每轮 +1
         self._last_activity[user_id] = time.time()
+        if session_id:
+            self._last_session_id[user_id] = session_id
         self._mark_dirty(user_id)
 
         # 检查是否达到触发阈值
@@ -148,18 +153,7 @@ class ConsolidationManager(IConsolidationManager):
             logger.debug(f"[Memory] 全局限速: 距上次 {now - self._global_last_consolidation:.0f}s")
             return
 
-        # 从 conversations.db 拉取完整上下文（后台异步操作，不依赖热缓存）
-        conv_text = ""
-        if session_id and self.conversation_store:
-            try:
-                conv_text = await self.conversation_store.get_recent_context(
-                    session_id, limit=50,
-                )
-            except Exception:
-                pass
-        if not conv_text:
-            conv_text = self._get_hot_context(user_id)
-
+        conv_text = await self._get_conversation_context(user_id)
         logger.info(f"[Memory] 对话轮数触发整理: uid={user_id}, rounds={state.msg_count}")
         if self.warm_processor:
             await self.warm_processor.enqueue(user_id, conv_text, state, on_done=self._after_consolidation)
@@ -257,7 +251,7 @@ class ConsolidationManager(IConsolidationManager):
                         continue
 
                     logger.info(f"[Memory] 空闲超时触发: {uid}")
-                    conv_text = self._get_hot_context(uid)
+                    conv_text = await self._get_conversation_context(uid)
                     if self.warm_processor:
                         await self.warm_processor.enqueue(uid, conv_text, state, on_done=self._after_consolidation)
             except asyncio.CancelledError:
@@ -293,7 +287,7 @@ class ConsolidationManager(IConsolidationManager):
                     if self._global_last_consolidation > 0 and now - self._global_last_consolidation < self._min_global_interval:
                         continue
                     logger.info(f"[Memory] 定时扫描触发: uid={uid}")
-                    conv_text = self._get_hot_context(uid)
+                    conv_text = await self._get_conversation_context(uid)
                     if self.warm_processor:
                         await self.warm_processor.enqueue(uid, conv_text, state, on_done=self._after_consolidation)
             except asyncio.CancelledError:
@@ -321,8 +315,32 @@ class ConsolidationManager(IConsolidationManager):
 
     # ── 辅助 ──
 
+    async def _get_conversation_context(self, user_id: str) -> str:
+        """获取用户最近的对话上下文，优先从 conversations.db 拉取
+
+        后台异步操作不需要实时性，DB 提供更完整的对话历史。
+        降级到热缓存（DB 不可用或无私聊 session_id 时）。
+        """
+        sid = self._last_session_id.get(user_id, "")
+        if sid and self.conversation_store:
+            try:
+                text = await self.conversation_store.get_recent_context(
+                    sid, limit=50,
+                )
+                if text:
+                    return text
+            except Exception:
+                pass
+        # 降级：热缓存
+        if self.hot_cache:
+            try:
+                return self.hot_cache.format_recent_context(user_id, limit=10)
+            except Exception:
+                pass
+        return ""
+
     def _get_hot_context(self, user_id: str) -> str:
-        """从热缓存获取用户 + Bot 双向对话上下文"""
+        """仅热缓存兜底（旧内部接口保留）"""
         if not self.hot_cache:
             return ""
         try:

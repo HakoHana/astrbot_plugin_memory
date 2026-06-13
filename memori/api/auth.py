@@ -187,6 +187,11 @@ class AuthManager:
         if self._is_public_path(path):
             return await call_next(request)
 
+        # 如果 auth_disabled=True，跳过所有校验（开发/单机场景）
+        if self._config.get("auth_disabled", True):
+            request.state.user_id = "local_dev"
+            return await call_next(request)
+
         # 提取 token
         token = self._extract_token(request)
         user_id = await self.verify_token(token) if token else None
@@ -215,11 +220,15 @@ class AuthManager:
     def _extract_token(request: Request) -> str | None:
         """从请求中提取 token
 
-        优先级：Authorization header → query param
+        优先级：Authorization header → cookie → query param
         """
         auth = request.headers.get("Authorization", "")
         if auth.lower().startswith("bearer "):
             return auth[7:]
+        # 从 cookie 读取（AstrBot dashboard 的 JWT cookie）
+        cookie = request.cookies.get("astrbot_dashboard_jwt")
+        if cookie:
+            return cookie
         token = request.query_params.get("token")
         return token or None
 

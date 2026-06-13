@@ -228,6 +228,41 @@ class ConversationStore(BaseDbStore):
             lines.append(format_msg(ts, display, content, now))
         return "\n".join(lines)
 
+    async def get_context_since(self, session_id: str, after_id: int = 0,
+                                 limit: int = 50, bot_name: str = "我") -> str:
+        """获取自指定消息 ID 之后的对话上下文（滑窗追踪）
+
+        格式同 get_recent_context。
+        after_id=0 时退化为 get_recent_context（取最新 limit 条）。
+        """
+        from ..utils.context_formatter import format_msg
+        async with self._connect() as db:
+            if after_id > 0:
+                rows = await db.execute_fetchall(
+                    "SELECT role, content, sender_name, sender_id, timestamp, id "
+                    "FROM messages WHERE session_id=? AND id>? ORDER BY id ASC LIMIT ?",
+                    (session_id, after_id, limit),
+                )
+            else:
+                rows = await db.execute_fetchall(
+                    "SELECT role, content, sender_name, sender_id, timestamp, id "
+                    "FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?",
+                    (session_id, limit),
+                )
+                rows = list(reversed(rows))
+        if not rows:
+            return ""
+        now = time.time()
+        lines = []
+        for r in rows:
+            role, content, name, sid, ts = r[0], r[1], r[2] or "", r[3] or "", r[4] or now
+            if role == "user":
+                display = name if name else (sid or "用户")
+            else:
+                display = f"Bot: {bot_name}"
+            lines.append(format_msg(ts, display, content, now))
+        return "\n".join(lines)
+
     async def get_session_id(self, event) -> str:
         """从事件中提取会话 ID"""
         if hasattr(event, "unified_msg_origin"):

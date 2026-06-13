@@ -153,12 +153,13 @@ class PersistedSessionState:
     """持久化的会话状态 — 每个用户一份"""
     user_id: str
     msg_count: int = 0
-    warmup_threshold: int = 3          # 初始暖启动阈值（第3条消息才触发首次整理）
+    warmup_threshold: int = 3
     last_consolidated_at: float = 0.0
     last_diary_date: str = ""
     diary_count: int = 0
     diary_count_since_persona: int = 0
     l1_retry_count: int = 0
+    last_consolidated_msg_id: int = 0  # 上次整理时最新的消息 ID（滑窗追踪用）
 
     def reset_after_consolidation(self):
         """整理后重置计数"""

@@ -186,6 +186,20 @@ class ConsolidationManager(IConsolidationManager):
 
         state = self._get_or_create_state(user_id)
         state.reset_after_consolidation()
+
+        # 滑窗：记录最新消息 ID，下次只查增量
+        if result and result.wrote_diary:
+            sid = self._last_session_id.get(user_id, "")
+            if sid and self.conversation_store:
+                try:
+                    row = await self.conversation_store.fetchone(
+                        "SELECT MAX(id) FROM messages WHERE session_id=?", (sid,)
+                    )
+                    if row and row[0]:
+                        state.last_consolidated_msg_id = row[0]
+                except Exception:
+                    pass
+
         self._mark_dirty(user_id)
 
     # ═══════════════════════════════════════════════════
@@ -316,16 +330,17 @@ class ConsolidationManager(IConsolidationManager):
     # ── 辅助 ──
 
     async def _get_conversation_context(self, user_id: str) -> str:
-        """获取用户最近的对话上下文，优先从 conversations.db 拉取
+        """获取用户自上次整理后的新对话上下文（滑窗）
 
-        后台异步操作不需要实时性，DB 提供更完整的对话历史。
-        降级到热缓存（DB 不可用或无私聊 session_id 时）。
+        优先从 conversations.db 拉取，降级到热缓存。
         """
         sid = self._last_session_id.get(user_id, "")
         if sid and self.conversation_store:
             try:
-                text = await self.conversation_store.get_recent_context(
-                    sid, limit=50,
+                state = self._states.get(user_id)
+                after_id = state.last_consolidated_msg_id if state else 0
+                text = await self.conversation_store.get_context_since(
+                    sid, after_id=after_id, limit=50,
                 )
                 if text:
                     return text

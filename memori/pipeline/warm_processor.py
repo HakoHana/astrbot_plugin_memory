@@ -131,12 +131,15 @@ class WarmProcessor(IWarmProcessor):
 
         # 2. Judge — LLM 判断值不值得记
         judge = await self._judge(tagged)
-        if not judge or not judge.should_remember:
-            # 不值得记也要更新最后整理时间，避免无限重试
+        if judge is None:
+            # LLM 调用失败，不重置计数，下次再试
+            logger.warning(f"[WarmProcessor] Judge 调用失败，跳过: uid={user_id}")
+            return
+        if not judge.should_remember:
+            # 不值得记，是有效结论，重置计数
             if on_done:
                 try:
-                    result = CaptureResult(wrote_diary=False)
-                    await on_done(user_id, result)
+                    await on_done(user_id, CaptureResult(wrote_diary=False))
                 except Exception:
                     pass
             return
@@ -158,8 +161,7 @@ class WarmProcessor(IWarmProcessor):
                     )
                     if on_done:
                         try:
-                            result = CaptureResult(wrote_diary=False)
-                            await on_done(user_id, result)
+                            await on_done(user_id, CaptureResult(wrote_diary=False))
                         except Exception:
                             pass
                     return
@@ -168,9 +170,13 @@ class WarmProcessor(IWarmProcessor):
 
         # 4. Capture — 写日记 + 提取原子 + 更新图谱
         result = await self._capture_with_retry(user_id, tagged, judge)
+        if not result.wrote_diary:
+            # 全部重试失败，不重置计数，下次再试
+            logger.warning(f"[WarmProcessor] Capture 全部重试失败，保留轮数: uid={user_id}")
+            return
 
         # 5. Persona 更新（L3）
-        if result.wrote_diary and state:
+        if state:
             try:
                 await self._maybe_update_persona(user_id, state)
             except Exception as e:

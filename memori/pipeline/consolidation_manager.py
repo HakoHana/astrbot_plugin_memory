@@ -47,7 +47,7 @@ class ConsolidationManager(IConsolidationManager):
         self.config = config or {}
 
         # 配置
-        self._round_threshold = self.config.get("consolidation_rounds", 5)  # 每 N 轮 bot 对话触发一次
+        self._round_threshold = self.config.get("consolidation_rounds", 10)  # 每 N 轮 bot 对话触发一次
         self.idle_timeout_minutes = self.config.get("idle_timeout_minutes", 60)
         self._scan_interval_minutes = self.config.get("scan_interval_minutes", 120)
         self._min_global_interval = self.config.get("min_global_interval", 120)

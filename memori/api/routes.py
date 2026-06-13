@@ -369,7 +369,7 @@ _CONFIG_META = {
                            "hint": "启用后新用户短消息/重复消息/纯 emoji 不触发 LLM"},
     "hotcache_max_per_user": {"type": "int", "default": 50, "label": "热缓存容量(条)", "group": "整理",
                                "hint": "每用户热缓存最多保留多少条消息，超出的最早消息被丢弃"},
-    "consolidation_rounds": {"type": "int", "default": 5, "label": "整理触发轮数", "group": "整理",
+    "consolidation_rounds": {"type": "int", "default": 10, "label": "整理触发轮数", "group": "整理",
                               "hint": "Bot 参与对话达到此轮数后自动触发日记整理"},
     "idle_timeout_minutes": {"type": "int", "default": 60, "label": "空闲超时(分钟)", "group": "整理",
                               "hint": "用户超过此时间无新消息，自动整理未处理的消息"},

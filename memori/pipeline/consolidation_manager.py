@@ -46,6 +46,7 @@ class ConsolidationManager(IConsolidationManager):
         self.hot_cache = hot_cache
         self.warm_processor = warm_processor
         self.conversation_store = conversation_store
+        self.config = config or {}
 
         # 配置
         self._round_threshold = self.config.get("consolidation_rounds", 10)  # 每 N 轮 bot 对话触发一次

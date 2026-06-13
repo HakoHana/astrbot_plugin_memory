@@ -36,42 +36,25 @@
      ================================================================ */
   var API_BASE = "/api/v1";
 
-  // 旧 AstrBot 路径 → 新 memori API 路径映射
-  var API_MAP = {
-    "stats":                          "/stats",
-    "memories":                       "/memories",
-    "memories/day":                   "/memories",
-    "memories/update":                "/memories",
-    "memories/delete":                "/memories",
-    "memories/batch-delete":          "/memories",
-    "memories/batch-update":          "/memories",
-    "graph/overview":                 "/graph/overview",
-    "graph/query":                    "/graph/query",
-    "users":                          "/users",
-    "users/detail":                   "/users",
-    "diary":                          "/diaries",
-    "diary/update":                   "/diaries",
-  };
-
   function mapApiPath(path) {
     // 分离路径和查询参数
     var qi = path.indexOf("?");
     var base = qi !== -1 ? path.substring(0, qi) : path;
     var qs = qi !== -1 ? path.substring(qi + 1) : "";
-    // 查找映射
-    var mapped = API_MAP[base] || "/" + base;
-    // 处理 memories/day?did=X → /memories/{id}
+
+    // 记忆详情: memories/day?did=X → /memories/{id}
     if (base === "memories/day" && qs.startsWith("did=")) {
-      var id = qs.substring(4).split("&")[0];
-      return mapped + "/" + id;
+      var did = qs.substring(4).split("&")[0];
+      return "/memories/" + did;
     }
-    // 处理 users/detail?uid=X → /users/{uid}
+    // 用户详情: users/detail?uid=X → /users/{uid}
     if (base === "users/detail" && qs.startsWith("uid=")) {
       var uid = qs.substring(4).split("&")[0];
-      return mapped + "/" + encodeURIComponent(uid);
+      return "/users/" + encodeURIComponent(uid);
     }
-    // 其他：保留查询参数
-    return mapped + (qs ? "?" + qs : "");
+    // 路径映射：日记端点
+    if (base === "diary" || base === "diary/update") base = "diaries";
+    return "/" + base + (qs ? "?" + qs : "");
   }
 
   async function apiRequest(path, options) {
@@ -129,18 +112,13 @@
 
   function unwrapApiData(response) {
     if (!response) return {};
-    // memori 新格式: { ok: true, ... }
+    // memori 标准格式: { ok: true, ... }
     if (response.ok === true) {
-      // 移除 ok 字段，返回剩余数据
       var data = Object.assign({}, response);
       delete data.ok;
       return data;
     }
-    // 兼容旧格式: { status: "ok", data: {...} }
-    if (response && response.status === "ok" && Object.prototype.hasOwnProperty.call(response, "data")) {
-      return response.data || {};
-    }
-    return response || {};
+    return response;
   }
 
   function normalizeImportance(value) {
@@ -368,6 +346,7 @@
     if (name === "graph") { fetchGraphStats(); if (window.ensureGraphScene) window.ensureGraphScene(); }
     if (name === "memory" || name === "memories") { fetchMemories(); }
     if (name === "persons") { fetchPersonas(); }
+    if (name === "system") { fetchSystemOverview(); }
     if (name === "settings") { renderSettingsPage.render(); }
   }
 
@@ -978,8 +957,8 @@
   async function fetchMemories() {
     var params = new URLSearchParams();
     params.set("page", String(state.memory.page));
-    params.set("page_size", String(state.memory.pageSize));
-    if (state.memory.keyword) params.set("keyword", state.memory.keyword);
+    params.set("size", String(state.memory.pageSize));
+    if (state.memory.keyword) params.set("q", state.memory.keyword);
 
     try {
       var data = unwrapApiData(await apiRequest("memories?" + params.toString())) || {};
@@ -1297,8 +1276,8 @@
 
     try {
       var params = new URLSearchParams();
-      params.set("keyword", query);
-      params.set("page_size", String(k));
+      params.set("q", query);
+      params.set("size", String(k));
       var data = unwrapApiData(await apiRequest("memories?" + params.toString())) || {};
       data.elapsed = "";
       renderRecallResults(data);
@@ -1386,83 +1365,89 @@
      ================================================================ */
   async function fetchSystemOverview() {
     try {
-      var data = unwrapApiData(await apiRequest("stats")) || {};
-      renderSystemOverview(data);
+      // 同时拉取 stats 和 health
+      var [statsData, healthData] = await Promise.all([
+        apiRequest("stats").then(unwrapApiData).catch(function() { return {}; }),
+        fetch("/health").then(function(r) { return r.json(); }).catch(function() { return {}; }),
+      ]);
+      renderSystemOverview(statsData, healthData);
     } catch (e) {
       showToast(e.message || "系统加载失败", true);
     }
   }
 
-  function renderSystemOverview(data) {
-    state._systemCache = data;
-    var atoms = data.atoms || {};
-    document.getElementById("ss-total").textContent = atoms.total || 0;
-    document.getElementById("ss-imp").textContent = atoms.total > 0 ? "--" : "--";
-    document.getElementById("ss-nodes").textContent = data.graph_nodes || 0;
-    document.getElementById("ss-edges").textContent = data.graph_edges || 0;
-    document.getElementById("ss-diaries").textContent = data.diary_months || 0;
+  function renderSystemOverview(data, health) {
+    health = health || {};
+    state._systemCache = { data: data, health: health };
 
-    var byType = atoms.by_type || {};
-    var bins = ["0-1","1-2","2-3","3-4","4-5","5-6","6-7","7-8","8-9","9-10"];
-    var maxV = 1;
-    bins.forEach(function(b) { maxV = Math.max(maxV, dist[b] || 0); });
-    document.getElementById("importance-chart").innerHTML = bins.map(function(b) {
-      var v = dist[b] || 0;
-      var w = maxV ? (v / maxV * 100).toFixed(0) : 0;
-      return '<div class="bar-row"><span class="bar-row-label">' + b + '</span>' +
-        '<div class="bar-row-track"><div class="bar-row-fill" style="width:' + w + '%"></div></div>' +
-        '<span class="bar-row-value">' + v + '</span></div>';
-    }).join("");
+    // ── 统计卡片 ──
+    setText("ss-users", data.users || 0);
+    setText("ss-diaries", data.diaries || 0);
+    setText("ss-atoms", data.atoms || 0);
+    setText("ss-nodes", data.graph_nodes || 0);
+    setText("ss-edges", data.graph_edges || 0);
 
-    var atoms = data.atom_breakdown || {};
-    var atomTypes = ["factual","episodic","preference","relational","planned"];
-    var maxA = 1;
-    atomTypes.forEach(function(t) { maxA = Math.max(maxA, atoms[t] || 0); });
-    document.getElementById("atom-chart").innerHTML = atomTypes.map(function(t) {
-      var v = atoms[t] || 0;
-      var w = maxA ? (v / maxA * 100).toFixed(0) : 0;
-      return '<div class="bar-row"><span class="bar-row-label" style="width:80px">' + atomLabel(t) + '</span>' +
-        '<div class="bar-row-track"><div class="bar-row-fill" style="width:' + w + '%"></div></div>' +
-        '<span class="bar-row-value">' + v + '</span></div>';
-    }).join("");
-
-    var sessions = data.recent_sessions || [];
-    if (!sessions.length && data.sessions) {
-      sessions = Object.keys(data.sessions).map(function(k) {
-        return { session_id: k, message_count: data.sessions[k] };
-      }).sort(function(a, b) { return b.message_count - a.message_count; }).slice(0, 10);
-    }
-    document.getElementById("session-list").innerHTML = sessions.length
-      ? sessions.map(function(s) {
-        return '<div class="session-item"><span class="session-id">' + esc(s.session_id || s) + '</span>' +
-          '<span class="session-meta">' + (s.message_count || "") + (s.last_active ? ' · ' + esc(s.last_active) : '') + '</span></div>';
-      }).join("")
-      : '<div style="color:var(--text-tertiary);text-align:center;padding:20px">' + window.t("system.noActiveSessions") + '</div>';
-
-    if (data.backupsUnavailable) {
-      document.getElementById("backup-list").innerHTML = '<div style="color:var(--text-tertiary);text-align:center;padding:20px">' + window.t("common.unavailable") + '</div>';
-      return;
+    // ── 健康状态 ──
+    var statusEl = document.getElementById("ss-health-status");
+    if (statusEl) {
+      if (health.status === "ok") {
+        statusEl.innerHTML = '<span class="status-pill active">● 运行中</span>';
+      } else {
+        statusEl.innerHTML = '<span class="status-pill archived">● ' + (health.status || "未知") + '</span>';
+      }
     }
 
-    var list = data.backups || [];
-    document.getElementById("backup-list").innerHTML = list.length
-      ? list.map(function(b) {
-        return '<div class="backup-item"><span class="backup-version">' + esc(b.name || b.directory || "") + '</span>' +
-          '<span class="backup-date">' + esc(b.backup_timestamp || "") + '</span>' +
-          '<span class="backup-files">' + esc(window.t("system.files", b.file_count || b.files_copied || 0)) + '</span></div>';
-      }).join("")
-      : '<div style="color:var(--text-tertiary);text-align:center;padding:20px">' + window.t("system.noBackups") + '</div>';
+    setText("ss-health-db", health.db && health.db.connected
+      ? '✓ 已连接 (' + (health.db.nodes || 0) + ' 节点, ' + (health.db.edges || 0) + ' 边)'
+      : '✗ 未连接');
+
+    var llmEl = document.getElementById("ss-health-llm");
+    if (llmEl) {
+      llmEl.textContent = health.llm && health.llm.configured ? '✓ 已配置' : '✗ 未配置';
+      llmEl.style.color = health.llm && health.llm.configured ? 'var(--success)' : 'var(--danger)';
+    }
+
+    var embedEl = document.getElementById("ss-health-embed");
+    if (embedEl) {
+      embedEl.textContent = health.embed && health.embed.configured ? '✓ 已配置' : '✗ 未配置';
+      embedEl.style.color = health.embed && health.embed.configured ? 'var(--success)' : 'var(--text-tertiary)';
+    }
   }
 
-  function atomLabel(type) {
-    var keys = {
-      factual: "system.atomFactual",
-      episodic: "system.atomEpisodic",
-      preference: "system.atomPreference",
-      relational: "system.atomRelational",
-      planned: "system.atomPlanned",
-    };
-    return window.t(keys[type] || type);
+  function setText(id, val) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = String(val ?? "--");
+  }
+
+  function initSystemPage() {
+    var refreshBtn = document.getElementById("system-refresh-btn");
+    if (refreshBtn) refreshBtn.addEventListener("click", fetchSystemOverview);
+
+    var archiveBtn = document.getElementById("sys-archive-btn");
+    if (archiveBtn) archiveBtn.addEventListener("click", async function() {
+      var resultEl = document.getElementById("sys-op-result");
+      if (resultEl) resultEl.textContent = "归档中...";
+      try {
+        var resp = await fetch("/api/v1/archive/run", { method: "POST" });
+        var data = await resp.json();
+        if (resultEl) resultEl.textContent = data.ok ? "✅ 归档完成，已处理 " + (data.archived || 0) + " 条" : "❌ " + (data.error || "归档失败");
+      } catch (e) {
+        if (resultEl) resultEl.textContent = "❌ " + e.message;
+      }
+    });
+
+    var decayBtn = document.getElementById("sys-decay-btn");
+    if (decayBtn) decayBtn.addEventListener("click", async function() {
+      var resultEl = document.getElementById("sys-op-result");
+      if (resultEl) resultEl.textContent = "衰减中...";
+      try {
+        var resp = await fetch("/api/v1/decay/run", { method: "POST" });
+        var data = await resp.json();
+        if (resultEl) resultEl.textContent = data.ok ? "✅ 衰减完成，已处理 " + (data.decay_count || 0) + " 条" : "❌ " + (data.error || "衰减失败");
+      } catch (e) {
+        if (resultEl) resultEl.textContent = "❌ " + e.message;
+      }
+    });
   }
 
   /* ================================================================
@@ -1471,7 +1456,7 @@
   async function fetchGraphStats() {
     try {
       var data = unwrapApiData(await apiRequest("stats")) || {};
-      document.getElementById("gs-total").textContent = (data.atoms && data.atoms.total) || data.diary_months || "0";
+      document.getElementById("gs-total").textContent = data.atoms || data.diary_months || "0";
       document.getElementById("gs-nodes").textContent = data.graph_nodes || "0";
       document.getElementById("gs-edges").textContent = data.graph_edges || "0";
     } catch (_) {}
@@ -1489,6 +1474,7 @@
       initMemoryPage();
       initRecallPage();
       initPersonaPage();
+      initSystemPage();
 
       var peekClose = document.getElementById("peek-close");
       if (peekClose) peekClose.addEventListener("click", closePeek);

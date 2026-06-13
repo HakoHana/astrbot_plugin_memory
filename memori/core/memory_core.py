@@ -269,6 +269,18 @@ class MemoryCore:
             write_op_log=self.write_op_log,
         )
 
+        # 嵌入模型：优先用外部传入，否则如果配置了 embed_provider_id 则自动创建本地模型
+        if self.embed_provider is None and self.config.get("embed_provider_id"):
+            try:
+                from ..core.embed_providers import LocalEmbeddingProvider
+                model_name = self.config.get("embed_model_name", "BAAI/bge-m3")
+                self.embed_provider = LocalEmbeddingProvider(model_name)
+                logger.info(f"[MemoryCore] 已注册本地嵌入模型: {model_name}（懒加载，首次使用时才初始化）")
+            except ImportError:
+                logger.warning("[MemoryCore] sentence-transformers 未安装，嵌入不可用")
+            except Exception as e:
+                logger.warning(f"[MemoryCore] 本地嵌入模型注册失败: {e}")
+
         # Capturer
         self.capturer = Capturer(
             llm_provider=self.llm_provider,
@@ -901,8 +913,17 @@ class MemoryCore:
             if "judge_provider_id" in config:
                 self.llm_provider.set_judge_provider(config["judge_provider_id"])
         # 切换嵌入模型
-        if self.embed_provider and "embed_provider_id" in config:
-            self.embed_provider.set_provider(config["embed_provider_id"])
+        embed_id = config.get("embed_provider_id")
+        if embed_id == "local" and self.embed_provider is None:
+            try:
+                from ..core.embed_providers import LocalEmbeddingProvider
+                model_name = config.get("embed_model_name", "BAAI/bge-m3")
+                self.embed_provider = LocalEmbeddingProvider(model_name)
+                logger.info(f"[MemoryCore] 配置变更→创建本地嵌入模型: {model_name}")
+            except Exception as e:
+                logger.warning(f"[MemoryCore] 本地嵌入创建失败: {e}")
+        elif self.embed_provider and embed_id and embed_id != "local":
+            self.embed_provider.set_provider(embed_id)
 
     # 向后兼容 — 旧的 memory_core.on_message 接口
     async def on_message(self, event, sender_name: str = "") -> str | None:

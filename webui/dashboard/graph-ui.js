@@ -66,10 +66,6 @@
     if (response && response.ok === true) {
       return response;
     }
-    // 旧格式: { status: "ok", data: {...} }
-    if (response && response.status === "ok" && Object.prototype.hasOwnProperty.call(response, "data")) {
-      return response.data || {};
-    }
     if (response && response.status === "error") {
       throw new Error(response.message || window.t("misc.requestFailed"));
     }

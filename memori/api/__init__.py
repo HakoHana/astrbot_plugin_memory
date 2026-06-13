@@ -267,43 +267,47 @@ def create_app(
         from fastapi.responses import FileResponse
         import mimetypes
 
+        # 注入 __MEMORI_CONFIG__ 到 dashboard/index.html（零延迟配置加载）
+        _dashboard_index = _webui_path / "dashboard" / "index.html"
+
+        def _inject_config(core):
+            import json
+            from .routes import _CONFIG_META
+            if not core:
+                return None
+            groups = {}
+            for key, meta in _CONFIG_META.items():
+                group = meta["group"]
+                if group not in groups:
+                    groups[group] = []
+                if key.startswith("archive_"):
+                    sub_key = key.replace("archive_", "")
+                    archive_cfg = core.config.get("archive", {})
+                    current = archive_cfg.get(sub_key, meta["default"])
+                else:
+                    current = core.config.get(key, meta["default"])
+                groups[group].append({"key": key, "value": current, **meta})
+            config_json = json.dumps({"groups": groups}, ensure_ascii=False)
+            html = _dashboard_index.read_text(encoding="utf-8")
+            inject = f'<script>window.__MEMORI_CONFIG__ = {config_json};</script>'
+            html = html.replace("</head>", inject + "</head>")
+            return html
+
         @app.get("/webui/{rest:path}")
         async def webui_files(rest: str, request: Request):
+            # dashboard/index.html → 注入配置
+            if rest.endswith("dashboard/index.html"):
+                core = getattr(request.app.state, "memory_core", None)
+                injected = _inject_config(core)
+                if injected:
+                    return HTMLResponse(content=injected)
+                return FileResponse(_dashboard_index, media_type="text/html")
+
             file_path = _webui_path / rest
-            # 404 处理
             if not file_path.exists() or not file_path.is_file():
                 return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
-            # index.html → 注入配置数据
-            if rest.endswith("dashboard/index.html"):
-                import json
-                from .routes import _CONFIG_META
-                core = getattr(request.app.state, "memory_core", None)
-                if not core:
-                    return FileResponse(file_path, media_type="text/html")
-                groups = {}
-                for key, meta in _CONFIG_META.items():
-                    group = meta["group"]
-                    if group not in groups:
-                        groups[group] = []
-                    if key.startswith("archive_"):
-                        sub_key = key.replace("archive_", "")
-                        archive_cfg = core.config.get("archive", {})
-                        current = archive_cfg.get(sub_key, meta["default"])
-                    else:
-                        current = core.config.get(key, meta["default"])
-                    groups[group].append({"key": key, "value": current, **meta})
-                config_json = json.dumps({"groups": groups}, ensure_ascii=False)
-                html = file_path.read_text(encoding="utf-8")
-                inject = f'<script>window.__MEMORI_CONFIG__ = {config_json};</script>'
-                html = html.replace("</head>", inject + "</head>")
-                return HTMLResponse(content=html)
-
-            # 其他文件原样返回
             media_type, _ = mimetypes.guess_type(str(file_path))
             return FileResponse(file_path, media_type=media_type or "application/octet-stream")
-
-    _ui_path = Path(__file__).parent / "webui_config.html"
 
     @app.get("/")
     async def root():
@@ -313,13 +317,13 @@ def create_app(
 
     @app.get("/settings")
     async def settings_redirect():
-        """设置页快捷入口"""
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/webui/settings/index.html")
+        """设置页 → 跳转到 Dashboard 设置页"""
+        return RedirectResponse(url="/webui/dashboard/index.html#settings")
 
     @app.get("/config")
-    async def config_page():
-        return HTMLResponse(content=_ui_path.read_text(encoding="utf-8"))
+    async def config_redirect():
+        """配置页 → 跳转到 Dashboard 设置页"""
+        return RedirectResponse(url="/webui/dashboard/index.html#settings")
 
     @app.get("/health")
     async def health():

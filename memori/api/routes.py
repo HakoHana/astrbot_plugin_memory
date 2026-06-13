@@ -407,23 +407,32 @@ _CONFIG_META = {
 @router.get("/v1/config")
 async def get_config(core: MemoryCore = Depends(get_core)):
     """获取当前配置（含元数据）"""
+    # 从模型提供商提取选项列表
+    providers = core.config.get("_providers", [])
+    provider_names = [p.get("name", "") for p in providers if p.get("name")]
+    # 嵌入模型额外包含 "local" 选项（使用本地 sentence-transformers）
+    embed_options = ["local"] + provider_names if provider_names else ["local"]
+
     groups = {}
     for key, meta in _CONFIG_META.items():
         group = meta["group"]
         if group not in groups:
             groups[group] = []
-        # 扁平键 → 读取嵌套配置
         if key.startswith("archive_"):
             sub_key = key.replace("archive_", "")
             archive_cfg = core.config.get("archive", {})
             current = archive_cfg.get(sub_key, meta["default"])
         else:
             current = core.config.get(key, meta["default"])
-        groups[group].append({
-            "key": key,
-            "value": current,
-            **meta,
-        })
+        entry = {"key": key, "value": current, **meta}
+        # 三个模型字段动态注入 select 选项
+        if key in ("llm_provider_id", "judge_provider_id"):
+            entry["type"] = "select"
+            entry["options"] = provider_names if provider_names else [""]
+        elif key == "embed_provider_id":
+            entry["type"] = "select"
+            entry["options"] = embed_options
+        groups[group].append(entry)
     return {"ok": True, "groups": groups}
 
 
@@ -711,3 +720,215 @@ async def read_diary(body: ReadDiaryRequest, core: MemoryCore = Depends(get_core
             for a in atoms
         ],
     )
+
+
+# ═══════════════════════════════════════════════
+#  批量重处理：日记 → 原子 → 图谱 → 画像
+# ═══════════════════════════════════════════════
+
+class ReprocessRequest(BaseModel):
+    user_id: str | None = Field(None, description="限制处理某个用户，空=全部")
+    max_diaries: int = Field(9999, ge=1, description="最多处理几条")
+    skip_atoms: bool = Field(False, description="跳过原子提取")
+    skip_graph: bool = Field(False, description="跳过图谱索引")
+    skip_persona: bool = Field(False, description="跳过画像重建")
+
+
+@router.post("/v1/admin/reprocess")
+async def reprocess(
+    body: ReprocessRequest,
+    core: MemoryCore = Depends(get_core),
+):
+    """批量重处理：遍历已有日记 → 提取原子 → 建图谱索引 → 重建画像"""
+    import time
+    import json
+    import logging
+
+    logger = logging.getLogger("memori")
+
+    capturer = getattr(core, "capturer", None)
+    graph_engine = getattr(core, "graph_engine", None)
+    persona_engine = getattr(core, "persona_engine", None)
+    uow = getattr(core, "_uow", None) or getattr(capturer, "_store", None)
+
+    if not capturer or not uow:
+        raise HTTPException(400, "Capturer 或存储层未就绪")
+
+    start_ts = time.time()
+    results = {
+        "diaries_processed": 0,
+        "atoms_created": 0,
+        "graph_indexed": 0,
+        "personas_rebuilt": 0,
+        "errors": [],
+        "duration_seconds": 0,
+    }
+
+    # 1. 读取日记
+    if body.user_id:
+        rows = await core.diary_store.fetch(
+            "SELECT id, user_id, date, content FROM diary_entries "
+            "WHERE user_id=? AND status='active' ORDER BY id", (body.user_id,)
+        )
+    else:
+        rows = await core.diary_store.fetch(
+            "SELECT id, user_id, date, content FROM diary_entries WHERE status='active' ORDER BY id"
+        )
+
+    total = len(rows)
+    limit = min(body.max_diaries, total)
+    logger.info(f"[reprocess] 开始重处理: {limit}/{total} 条日记")
+    users_affected = set()
+
+    for idx in range(limit):
+        diary_id, user_id, date, content = rows[idx]
+        users_affected.add(user_id)
+        logger.info(f"[reprocess] [{idx+1}/{limit}] 日记 #{diary_id} ({user_id} @ {date})")
+
+        try:
+            # ── 提取原子 ──
+            if not body.skip_atoms:
+                atoms = await capturer._extract_atoms(content, user_id, date)
+                if atoms:
+                    # 保存原子
+                    atom_ids = await uow.insert_atoms(atoms)
+                    # 关联到日记
+                    for aid, atom in zip(atom_ids, atoms):
+                        if aid > 0:
+                            await core.atom_store.link_atom_to_diary(
+                                aid, diary_id,
+                                importance=atom.importance,
+                                snippet=content[:150],
+                            )
+                    results["atoms_created"] += len(atom_ids)
+
+                    # 计算 embedding（如果有 embed provider）
+                    await capturer._compute_embeddings(atoms)
+
+            # ── 图谱索引 ──
+            if not body.skip_graph and graph_engine:
+                await graph_engine.index_diary(diary_id, content)
+                results["graph_indexed"] += 1
+
+            results["diaries_processed"] += 1
+
+        except Exception as e:
+            err_msg = f"日记 #{diary_id}: {type(e).__name__}: {e}"
+            logger.error(f"[reprocess] {err_msg}")
+            results["errors"].append(err_msg)
+
+    # ── 批量图谱后处理 ──
+    if not body.skip_graph and graph_engine:
+        try:
+            cooc_count = await graph_engine.batch_cooccur()
+            logger.info(f"[reprocess] 共现边批量更新: {cooc_count}")
+        except Exception as e:
+            logger.warning(f"[reprocess] 共现边更新失败: {e}")
+
+    # ── 重建画像 ──
+    if not body.skip_persona and persona_engine:
+        for uid in users_affected:
+            try:
+                await persona_engine.full_rebuild(uid)
+                results["personas_rebuilt"] += 1
+                logger.info(f"[reprocess] 画像重建完成: {uid}")
+            except Exception as e:
+                err_msg = f"画像 {uid}: {type(e).__name__}: {e}"
+                logger.error(f"[reprocess] {err_msg}")
+                results["errors"].append(err_msg)
+
+    results["duration_seconds"] = round(time.time() - start_ts, 1)
+    return {"ok": True, **results}
+
+
+@router.post("/v1/admin/embed-dedup")
+async def embed_and_dedup(
+    core: MemoryCore = Depends(get_core),
+):
+    """为所有无 embedding 的原子计算嵌入，然后执行语义去重"""
+    import time
+    import logging
+
+    logger = logging.getLogger("memori")
+    start_ts = time.time()
+
+    # 创建本地嵌入提供者（BAAI/bge-m3 = 1024维，支持中英文）
+    embed_provider = getattr(core, "embed_provider", None)
+    if embed_provider is None:
+        try:
+            from ..core.embed_providers import LocalEmbeddingProvider
+            embed_provider = LocalEmbeddingProvider("BAAI/bge-m3")
+            core.embed_provider = embed_provider
+            if core.capturer:
+                core.capturer.embed_provider = embed_provider
+            logger.info("[embed-dedup] 创建 LocalEmbeddingProvider")
+        except Exception as e:
+            raise HTTPException(500, f"无法创建嵌入提供者: {e}")
+
+    # 清除旧的 384维 embedding（之前用 all-MiniLM-L6-v2 生成的），改用 1024维 bge-m3
+    try:
+        await core.atom_store.execute(
+            "UPDATE memory_atoms SET embedding=NULL, embedding_model='' WHERE embedding IS NOT NULL"
+        )
+    except Exception:
+        pass
+
+    # 获取所有需要计算 embedding 的活跃原子
+    try:
+        rows = await core.atom_store.fetch(
+            "SELECT id, content FROM memory_atoms "
+            "WHERE status='active' AND embedding IS NULL "
+            "ORDER BY id"
+        )
+    except Exception as e:
+        raise HTTPException(500, f"查询原子失败: {e}")
+
+    total = len(rows)
+    logger.info(f"[embed-dedup] 待计算: {total} 条原子")
+    embedded = 0
+
+    # 分批计算（每批 32 条）
+    batch_size = 32
+    for i in range(0, total, batch_size):
+        batch = rows[i:i + batch_size]
+        texts = [r[1] for r in batch]
+        ids = [r[0] for r in batch]
+        try:
+            embeddings = await embed_provider.embed_batch(texts)
+            model_name = embed_provider.model_name
+            for aid, emb in zip(ids, embeddings):
+                import json
+                blob = json.dumps(emb).encode("utf-8")
+                await core.atom_store.execute(
+                    "UPDATE memory_atoms SET embedding=?, embedding_model=? WHERE id=?",
+                    (blob, model_name, aid),
+                )
+                embedded += 1
+        except Exception as e:
+            logger.warning(f"[embed-dedup] 批处理失败 ({i}~{i+len(batch)}): {e}")
+
+    # 语义去重
+    dedup_count = 0
+    try:
+        from ..lifecycle.dedup import DedupEngine
+        dedup = DedupEngine(core.atom_store)
+        model_name = embed_provider.model_name
+        # 逐用户扫描去重
+        users = await core.atom_store.fetch(
+            "SELECT DISTINCT user_id FROM memory_atoms WHERE status='active'"
+        )
+        for (uid,) in users:
+            count = await dedup.scan_semantic_duplicates(threshold=0.92)
+            dedup_count += count
+        logger.info(f"[embed-dedup] 语义去重完成: {dedup_count} 条标记为 dormant")
+    except Exception as e:
+        logger.warning(f"[embed-dedup] 语义去重失败: {e}")
+
+    duration = round(time.time() - start_ts, 1)
+    return {
+        "ok": True,
+        "total_atoms": total,
+        "embedded": embedded,
+        "dedup_marked": dedup_count,
+        "duration_seconds": duration,
+    }

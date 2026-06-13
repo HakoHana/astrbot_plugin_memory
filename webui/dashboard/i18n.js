@@ -56,6 +56,11 @@
 
     /* ---- Stats ---- */
     "stats.total":        { zh: "总记忆", en: "Total", ru: "Всего" },
+    "stats.users":        { zh: "用户", en: "Users", ru: "Пользователи" },
+    "stats.diaries":      { zh: "日记", en: "Diaries", ru: "Дневники" },
+    "stats.atoms":        { zh: "记忆原子", en: "Atoms", ru: "Атомы" },
+    "stats.graphNodes":   { zh: "图谱节点", en: "Graph Nodes", ru: "Узлы графа" },
+    "stats.graphEdges":   { zh: "关系边", en: "Graph Edges", ru: "Связи графа" },
     "stats.active":       { zh: "活跃", en: "Active", ru: "Активно" },
     "stats.archived":     { zh: "已归档", en: "Archived", ru: "Архив" },
     "stats.deleted":      { zh: "已删除", en: "Deleted", ru: "Удалено" },
@@ -298,7 +303,6 @@
     "graph.tooltipMemory": { zh: "记忆 {0} · 关系 {1} · 条目 {2}", en: "Memory {0} · Rel {1} · Entries {2}", ru: "Память {0} · Связ {1} · Запис {2}" },
 
     /* ---- Graph Bridge Error ---- */
-    "graph.bridgeError":  { zh: "当前页面必须运行在 AstrBot 官方插件 Page 内。", en: "This page must run inside an AstrBot plugin page.", ru: "Страница должна работать внутри страницы плагина AstrBot." },
 
     /* ---- Recall Test ---- */
     "recall.clearBtn":    { zh: "清空结果", en: "Clear Results", ru: "Очистить" },
@@ -350,9 +354,6 @@
     /* ---- Theme ---- */
     "theme.darkToast":    { zh: "🌙 已切换到深色模式", en: "🌙 Dark mode enabled", ru: "🌙 Тёмная тема включена" },
     "theme.lightToast":   { zh: "☀️ 已切换到浅色模式", en: "☀️ Light mode enabled", ru: "☀️ Светлая тема включена" },
-
-    /* ---- Bridge Error ---- */
-    "bridge.error":       { zh: "当前页面必须运行在 AstrBot 官方插件 Page 内", en: "This page must run inside an AstrBot plugin page", ru: "Страница должна работать внутри страницы плагина AstrBot" },
 
     /* ---- Misc ---- */
     "misc.requestFailed": { zh: "请求失败", en: "Request failed", ru: "Ошибка запроса" },
@@ -420,60 +421,28 @@
   /* ---- Engine ---- */
   let currentLang = "zh";
 
-  function getBridgeLocale() {
-    try {
-      const bridge = window.AstrBotPluginPage;
-      if (bridge) {
-        const ctx = bridge.getContext();
-        if (ctx && ctx.locale) {
-          const lang = String(ctx.locale).split("-")[0];
-          if (SUPPORTED.includes(lang)) return lang;
-        }
-      }
-    } catch (_) { /* ignore */ }
-    return null;
-  }
-
   function detectLanguage() {
-    // 1. Bridge context (AstrBot dashboard locale — highest priority)
-    const bridgeLocale = getBridgeLocale();
-    if (bridgeLocale) return bridgeLocale;
-
-    // 2. URL param (override)
+    // 1. URL param (override)
     try {
       const params = new URLSearchParams(window.location.search);
       const langParam = params.get("lang");
       if (langParam && SUPPORTED.includes(langParam)) return langParam;
     } catch (_) { /* ignore */ }
 
-    // 3. localStorage
+    // 2. localStorage
     try {
       const stored = localStorage.getItem(LANG_KEY);
       if (stored && SUPPORTED.includes(stored)) return stored;
     } catch (_) { /* ignore */ }
 
-    // 4. navigator
+    // 3. navigator
     try {
       const nav = (navigator.language || "").split("-")[0];
       if (SUPPORTED.includes(nav)) return nav;
     } catch (_) { /* ignore */ }
 
-    // 5. default
+    // 4. default
     return "zh";
-  }
-
-  function listenBridgeLocale() {
-    try {
-      const bridge = window.AstrBotPluginPage;
-      if (!bridge || typeof bridge.onContext !== "function") return;
-      bridge.onContext(function (ctx) {
-        if (!ctx || !ctx.locale) return;
-        const lang = String(ctx.locale).split("-")[0];
-        if (SUPPORTED.includes(lang) && lang !== currentLang) {
-          window.setLanguage(lang);
-        }
-      });
-    } catch (_) { /* ignore */ }
   }
 
   /**
@@ -526,6 +495,5 @@
   document.documentElement.setAttribute("lang", currentLang === "zh" ? "zh-CN" : currentLang === "ru" ? "ru" : "en");
   document.addEventListener("DOMContentLoaded", () => {
     applyI18n();
-    listenBridgeLocale();
   });
 })();

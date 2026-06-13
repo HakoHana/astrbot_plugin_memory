@@ -340,6 +340,26 @@ class IHotMessageCache(ABC):
         """将未刷写的消息批量持久化到 conversations.db"""
         ...
 
+    @abstractmethod
+    def set_water_callback(self, callback):
+        """注册水位线回调，缓存满时调用 callback(user_id)"""
+        ...
+
+    @abstractmethod
+    def reset_water_level(self, user_id: str):
+        """整理完成后重置用户的水位线标记，允许再次触发"""
+        ...
+
+    @abstractmethod
+    def update_config(self, config: dict):
+        """热更新缓存配置（max_per_user, water_level）"""
+        ...
+
+    @abstractmethod
+    def stats(self) -> dict[str, int]:
+        """返回每用户的消息数"""
+        ...
+
 
 # ═══════════════════════════════════════════════════════════
 #  用户身份解析器

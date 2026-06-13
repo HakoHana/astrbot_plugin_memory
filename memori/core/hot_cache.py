@@ -34,15 +34,29 @@ class HotMessageCache(IHotMessageCache):
     Retriever.get_recent_context 直接从此读取（零 SQL 开销）。
 
     WAL 文件做崩溃恢复，flushed 标记防止重复刷写。
+
+    水位线触发：
+    - push() 后检查该用户缓存数 >= water_level 且未触发过 → 调 callback
+    - callback 通常是 ConsolidationManager 的触发入口
+    - 整理完成后由外部调 reset_water_level() 解除标记
     """
 
-    MAX_PER_USER = 50
+    def __init__(self, data_dir: str = "", config: dict | None = None):
+        config = config or {}
+        self._max_per_user: int = config.get("hotcache_max_per_user", 50)
+        self._water_level: int = config.get("hotcache_water_level", 40)
+        # 水位线不能超过缓存上限
+        if self._water_level > self._max_per_user:
+            self._water_level = self._max_per_user
 
-    def __init__(self, data_dir: str = ""):
         self._caches: dict[str, deque[dict[str, Any]]] = {}
         self._wal_dir = Path(data_dir) / "hotcache" if data_dir else None
         if self._wal_dir:
             self._wal_dir.mkdir(parents=True, exist_ok=True)
+
+        # 水位线触发
+        self._water_fired: set[str] = set()  # 当前水位已触发过的用户
+        self._water_callback = None  # callback(user_id) -> None
 
     # ═══════════════════════════════════════════════════
     #  启动恢复
@@ -64,7 +78,7 @@ class HotMessageCache(IHotMessageCache):
                         continue
                     msg = json.loads(line)
                     if user_id not in self._caches:
-                        self._caches[user_id] = deque(maxlen=self.MAX_PER_USER)
+                        self._caches[user_id] = deque(maxlen=self._max_per_user)
                     self._caches[user_id].append(msg)
                     count += 1
             except Exception as exc:
@@ -90,7 +104,7 @@ class HotMessageCache(IHotMessageCache):
         if not user_id:
             return
         if user_id not in self._caches:
-            self._caches[user_id] = deque(maxlen=self.MAX_PER_USER)
+            self._caches[user_id] = deque(maxlen=self._max_per_user)
 
         msg = {
             "role": role,
@@ -105,6 +119,12 @@ class HotMessageCache(IHotMessageCache):
 
         # WAL：追加写入（类 Redis AOF，每条消息持久化）
         self._append_wal(user_id, msg)
+
+        # 水位线检查：达到水位且未触发过 → 回调
+        if self._water_callback and len(self._caches[user_id]) >= self._water_level:
+            if user_id not in self._water_fired:
+                self._water_fired.add(user_id)
+                self._water_callback(user_id)
 
     def _append_wal(self, user_id: str, msg: dict):
         """追加一条记录到 WAL 文件"""
@@ -235,10 +255,35 @@ class HotMessageCache(IHotMessageCache):
     #  管理
     # ═══════════════════════════════════════════════════
 
+    def set_water_callback(self, callback):
+        """注册水位线回调，缓存满时调用 callback(user_id)"""
+        self._water_callback = callback
+
+    def reset_water_level(self, user_id: str):
+        """整理完成后重置用户的水位线标记，允许再次触发"""
+        self._water_fired.discard(user_id)
+
+    def update_config(self, config: dict):
+        """热更新缓存配置
+
+        支持：
+        - hotcache_max_per_user: 每用户最大缓存条数
+        - hotcache_water_level: 水位线
+        """
+        max_val = config.get("hotcache_max_per_user")
+        if max_val is not None and max_val > 0:
+            self._max_per_user = int(max_val)
+        wl = config.get("hotcache_water_level")
+        if wl is not None and wl > 0:
+            self._water_level = int(wl)
+        if self._water_level > self._max_per_user:
+            self._water_level = self._max_per_user
+
     def clear(self, user_id: str | None = None):
         """清空缓存（同时清除 WAL 文件）"""
         if user_id:
             self._caches.pop(user_id, None)
+            self._water_fired.discard(user_id)
             if self._wal_dir:
                 try:
                     (self._wal_dir / f"{user_id}.wal").unlink(missing_ok=True)
@@ -246,6 +291,7 @@ class HotMessageCache(IHotMessageCache):
                     pass
         else:
             self._caches.clear()
+            self._water_fired.clear()
             if self._wal_dir and self._wal_dir.exists():
                 import shutil
                 shutil.rmtree(self._wal_dir, ignore_errors=True)

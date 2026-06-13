@@ -1,16 +1,23 @@
-"""调度器 + 会话状态管理器 — 仅保留条件计数，重量操作委托 WarmProcessor"""
+"""调度器 + 会话状态管理器 — 水位线 + 空闲超时双触发，重量操作委托 WarmProcessor
+
+触发器设计：
+A. 热缓存水位线 — 用户热缓存消息数达到阈值 → 立刻触发
+B. 空闲超时 — 用户超过 N 分钟无活动 → 扫描未整理内容兜底整理
+
+全局限速防止多个用户同时触发挤爆 LLM 队列。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, Callable
 
 from ..core.logger import logger
 
 from ..models.memory_atom import PersistedSessionState
 from ..storage.state_store import StateStore
-from ..core.interfaces import IConsolidationManager, IWarmProcessor
+from ..core.interfaces import IConsolidationManager, IWarmProcessor, IHotMessageCache
 
 
 class ConsolidationManager(IConsolidationManager):
@@ -19,8 +26,9 @@ class ConsolidationManager(IConsolidationManager):
 
     职责（轻量）：
     - 消息计数 & 去抖
-    - 触发条件判断（条数阈值 / 时间间隔 / 暖启动）
-    - 全局限速
+    - 水位线触发（来自 HotCache 回调）
+    - 空闲超时兜底
+    - 全局限速 + 用户级限速
     - 会话状态持久化（延迟刷写）
     - 空闲超时兜底
 
@@ -30,18 +38,21 @@ class ConsolidationManager(IConsolidationManager):
     def __init__(
         self,
         state_store: StateStore,
+        hot_cache: IHotMessageCache | None = None,
         warm_processor=None,
         config: dict[str, Any] | None = None,
     ):
         self.state_store = state_store
+        self.hot_cache = hot_cache
         self.warm_processor = warm_processor
         self.config = config or {}
 
         # 配置
-        self.trigger_msg_count = self.config.get("trigger_msg_count", 10)
-        self.trigger_time_minutes = self.config.get("trigger_time_minutes", 360)
-        self.warmup_enabled = self.config.get("warmup_enabled", True)
-        self.idle_timeout_minutes = self.config.get("idle_timeout_minutes", 30)
+        self.idle_timeout_minutes = self.config.get("idle_timeout_minutes", 60)
+        self._scan_interval_minutes = self.config.get("scan_interval_minutes", 120)
+        self._min_global_interval = self.config.get("min_global_interval", 120)
+        # 用户级速率（独立于全局限速，防同用户刷屏重复触发）
+        self._min_user_interval = self.config.get("min_user_interval", 60)
 
         # 会话状态（内存中，延迟写回）
         self._states: dict[str, PersistedSessionState] = {}
@@ -54,6 +65,9 @@ class ConsolidationManager(IConsolidationManager):
         self._idle_check_interval: float = 60.0
         self._last_activity: dict[str, float] = {}
 
+        # 定时扫描（不管用户是否活跃，周期扫积压）
+        self._periodic_scan_task: asyncio.Task | None = None
+
         # 去抖
         self._debounce_interval: float = 10.0
         self._last_trigger_check: dict[str, float] = {}
@@ -61,9 +75,15 @@ class ConsolidationManager(IConsolidationManager):
 
         # 全局限速
         self._global_last_consolidation: float = 0.0
-        self._min_global_interval: float = 120.0
+
+        # 用户级限速（独立于全局限速）
+        self._last_user_consolidation: dict[str, float] = {}
 
         self._destroyed = False
+
+        # 注册为 HotCache 水位线回调
+        if self.hot_cache:
+            self.hot_cache.set_water_callback(self._on_water_trigger)
 
     async def initialize(self):
         """从数据库恢复所有会话状态"""
@@ -76,12 +96,13 @@ class ConsolidationManager(IConsolidationManager):
 
         self._flush_task = asyncio.create_task(self._flush_loop())
         self._idle_check_task = asyncio.create_task(self._idle_check_loop())
+        self._periodic_scan_task = asyncio.create_task(self._periodic_scan_loop())
 
     async def destroy(self):
         """销毁调度器"""
         self._destroyed = True
         pending_tasks = []
-        for t in (self._flush_task, self._idle_check_task):
+        for t in (self._flush_task, self._idle_check_task, self._periodic_scan_task):
             if t and not t.done():
                 t.cancel()
                 pending_tasks.append(t)
@@ -95,11 +116,54 @@ class ConsolidationManager(IConsolidationManager):
         self._states.clear()
         self._dirty_users.clear()
 
+    # ═══════════════════════════════════════════════════
+    #  A. 水位线触发（由 HotCache 回调）
+    # ═══════════════════════════════════════════════════
+
+    def _on_water_trigger(self, user_id: str):
+        """HotCache 水位线到顶时回调此方法"""
+        if self._destroyed:
+            return
+        # 异步执行，不阻塞 HotCache.push()
+        task = asyncio.ensure_future(self._handle_water_trigger(user_id))
+        task.add_done_callback(lambda t: None)
+
+    async def _handle_water_trigger(self, user_id: str):
+        """异步处理水位触发"""
+        # 用户级限速
+        now = time.time()
+        last_user = self._last_user_consolidation.get(user_id, 0.0)
+        if now - last_user < self._min_user_interval:
+            logger.debug(f"[Memory] 用户级限速: {user_id} 距上次 {now - last_user:.0f}s")
+            return
+
+        # 全局限速
+        if self._global_last_consolidation > 0 and now - self._global_last_consolidation < self._min_global_interval:
+            logger.debug(f"[Memory] 全局限速: 距上次 {now - self._global_last_consolidation:.0f}s")
+            return
+
+        # 取热缓存最近的对话上下文作为整理素材（用户 + Bot 双向消息）
+        conversation_text = self._get_hot_context(user_id)
+
+        state = self._get_or_create_state(user_id)
+        logger.info(f"[Memory] 水位线触发整理: uid={user_id}")
+        if self.warm_processor:
+            await self.warm_processor.enqueue(user_id, conversation_text, state, on_done=self._after_consolidation)
+
+    # ═══════════════════════════════════════════════════
+    #  B. on_message（AstrBot 每条消息调一次）
+    # ═══════════════════════════════════════════════════
+
     async def on_message(self, user_id: str, conversation_text: str, sender_name: str = ""):
         """
-        每次消息调用：计数 → 判断是否触发 → 触发则入队 WarmProcessor
+        每次有消息到来时的入口。
 
-        所有重量操作都在后台队列中执行，本方法不阻塞。
+        职责（轻量）：
+        - 计数（用于空闲超时判断是否有新内容）
+        - 去抖
+        - 记录 last_activity（空闲超时用）
+
+        水位线触发由 HotCache.push() 直接回调，不经由此方法。
         """
         if self._destroyed:
             return
@@ -108,64 +172,42 @@ class ConsolidationManager(IConsolidationManager):
         self._pending_counts[user_id] = self._pending_counts.get(user_id, 0) + 1
         self._last_activity[user_id] = time.time()
 
-        # 2. 去抖
+        # 2. 去抖：10 秒内不重复刷状态
         now = time.time()
         last_check = self._last_trigger_check.get(user_id, 0.0)
         if now - last_check < self._debounce_interval:
             return
         self._last_trigger_check[user_id] = now
 
-        # 3. 内存计数 → 刷入状态
+        # 3. 内存计数 → 刷入持久状态
         state = self._get_or_create_state(user_id)
         state.msg_count += self._pending_counts.pop(user_id, 0)
         self._mark_dirty(user_id)
 
-        # 4. 全局限速：距上次整理不足 2 分钟则跳过
-        if self._global_last_consolidation > 0 and now - self._global_last_consolidation < self._min_global_interval:
-            logger.debug(f"[Memory] 全局限速: 距上次 {now - self._global_last_consolidation:.0f}s")
-            return
-
-        # 5. 检查触发条件
-        should_trigger = False
-        trigger_reason = ""
-
-        # A. 条数阈值（含暖启动）
-        threshold = state.warmup_threshold if (self.warmup_enabled and state.warmup_threshold > 0) else self.trigger_msg_count
-        if state.msg_count >= threshold:
-            should_trigger = True
-            trigger_reason = f"消息条数达到 {threshold}"
-
-        # B. 时间间隔
-        if not should_trigger and self.trigger_time_minutes > 0:
-            elapsed = now - state.last_consolidated_at
-            if elapsed >= self.trigger_time_minutes * 60:
-                should_trigger = True
-                trigger_reason = f"时间间隔达到 {self.trigger_time_minutes} 分钟"
-
-        if not should_trigger:
-            return
-
-        # 6. 触发 → 入队 WarmProcessor（非阻塞）
-        logger.info(f"[Memory] 触发整理: uid={user_id} {trigger_reason}")
-        if self.warm_processor:
-            await self.warm_processor.enqueue(user_id, conversation_text, state, sender_name, on_done=self._after_consolidation)
-
-    # ── 整理完成回调（由 WarmProcessor 执行完毕后调用） ──
+    # ═══════════════════════════════════════════════════
+    #  整理完成回调
+    # ═══════════════════════════════════════════════════
 
     async def _after_consolidation(self, user_id: str, result):
-        """整理后的收尾工作 — 状态更新 + 暖启动 + 标记脏"""
-        self._global_last_consolidation = time.time()
+        """整理后的收尾工作 — 状态重置 + 解除水位线"""
+        now = time.time()
+        self._global_last_consolidation = now
+        self._last_user_consolidation[user_id] = now
+
+        # 重置水位线，允许下次满水位再次触发
+        if self.hot_cache:
+            try:
+                self.hot_cache.reset_water_level(user_id)
+            except Exception:
+                pass
+
         state = self._get_or_create_state(user_id)
         state.reset_after_consolidation()
-
-        # 暖启动：阈值指数增长（封顶 trigger_msg_count）
-        if self.warmup_enabled and state.warmup_threshold > 0:
-            new_threshold = min(state.warmup_threshold * 2, self.trigger_msg_count)
-            state.warmup_threshold = 0 if new_threshold >= self.trigger_msg_count else new_threshold
-
         self._mark_dirty(user_id)
 
-    # ── 延迟刷写 ──
+    # ═══════════════════════════════════════════════════
+    #  延迟刷写
+    # ═══════════════════════════════════════════════════
 
     def _mark_dirty(self, user_id: str):
         self._dirty_users.add(user_id)
@@ -193,7 +235,9 @@ class ConsolidationManager(IConsolidationManager):
                     logger.warning(f"[Memory] 状态刷写失败 {uid}: {e}")
                     self._dirty_users.add(uid)
 
-    # ── 空闲检测 ──
+    # ═══════════════════════════════════════════════════
+    #  空闲超时（兜底）
+    # ═══════════════════════════════════════════════════
 
     async def _idle_check_loop(self):
         timeout_sec = self.idle_timeout_minutes * 60
@@ -206,19 +250,90 @@ class ConsolidationManager(IConsolidationManager):
                         return
                     if now - last_active < timeout_sec:
                         continue
+
                     state = self._states.get(uid)
+                    if not state:
+                        continue
+
+                    # 检查是否有未整理的新消息
                     pending = self._pending_counts.pop(uid, 0)
-                    if pending and state:
+                    has_content = (state.msg_count + pending) > 0
+
+                    if pending:
                         state.msg_count += pending
-                    if state and state.msg_count > 0 and self.warm_processor:
-                        logger.info(f"[Memory] 空闲超时触发: {uid}")
-                        await self.warm_processor.enqueue(uid, "", state, on_done=self._after_consolidation)
+                        self._mark_dirty(uid)
+
+                    if not has_content:
+                        continue
+
+                    # 用户级限速
+                    last_user = self._last_user_consolidation.get(uid, 0.0)
+                    if now - last_user < self._min_user_interval:
+                        continue
+
+                    # 全局限速
+                    if self._global_last_consolidation > 0 and now - self._global_last_consolidation < self._min_global_interval:
+                        continue
+
+                    logger.info(f"[Memory] 空闲超时触发: {uid}")
+                    conv_text = self._get_hot_context(uid)
+                    if self.warm_processor:
+                        await self.warm_processor.enqueue(uid, conv_text, state, on_done=self._after_consolidation)
             except asyncio.CancelledError:
                 break
             except Exception:
                 pass
 
-    # ── 状态管理 ──
+    # ═══════════════════════════════════════════════════
+    #  C. 定时扫描（不管活跃状态，周期扫积压）
+    # ═══════════════════════════════════════════════════
+
+    async def _periodic_scan_loop(self):
+        """定时扫描：每 scan_interval_minutes 扫一遍所有用户
+
+        不管用户是否活跃，只要距上次整理超过 scan_interval 且有积压内容
+        （包括未到水位线的和因限速被跳过的），就触发整理。
+        """
+        interval_sec = self._scan_interval_minutes * 60
+        while not self._destroyed:
+            try:
+                await asyncio.sleep(interval_sec)
+                if self._destroyed:
+                    return
+                now = time.time()
+                for uid, state in list(self._states.items()):
+                    if self._destroyed:
+                        return
+                    # 距上次整理不足一个周期则跳过
+                    if now - state.last_consolidated_at < interval_sec:
+                        continue
+                    # 合并 pending 计数到 state
+                    pending = self._pending_counts.pop(uid, 0)
+                    if pending:
+                        state.msg_count += pending
+                        self._mark_dirty(uid)
+                    # 没有积压内容则跳过
+                    if state.msg_count <= 0:
+                        continue
+                    # 用户级限速
+                    last_user = self._last_user_consolidation.get(uid, 0.0)
+                    if now - last_user < self._min_user_interval:
+                        continue
+                    # 全局限速
+                    if self._global_last_consolidation > 0 and now - self._global_last_consolidation < self._min_global_interval:
+                        continue
+                    logger.info(f"[Memory] 定时扫描触发: uid={uid}")
+                    conv_text = self._get_hot_context(uid)
+                    if self.warm_processor:
+                        await self.warm_processor.enqueue(uid, conv_text, state, on_done=self._after_consolidation)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
+    # ═══════════════════════════════════════════════════
+    #  状态管理
+    # ═══════════════════════════════════════════════════
 
     def _get_or_create_state(self, user_id: str) -> PersistedSessionState:
         if user_id not in self._states:
@@ -232,8 +347,25 @@ class ConsolidationManager(IConsolidationManager):
         """注入 WarmProcessor（初始化顺序解耦）"""
         self.warm_processor = warm_processor
 
+    def set_hot_cache(self, hot_cache: IHotMessageCache):
+        """注入 HotCache（初始化顺序解耦）"""
+        self.hot_cache = hot_cache
+        self.hot_cache.set_water_callback(self._on_water_trigger)
+
+    # ── 辅助 ──
+
+    def _get_hot_context(self, user_id: str) -> str:
+        """从热缓存获取用户 + Bot 双向对话上下文"""
+        if not self.hot_cache:
+            return ""
+        try:
+            return self.hot_cache.format_recent_context(user_id, limit=10)
+        except Exception:
+            return ""
+
     def update_config(self, config: dict[str, Any]):
-        """热更新配置 — 替代外部直接写内部属性"""
-        self.trigger_msg_count = config.get("trigger_msg_count", self.trigger_msg_count)
-        self.trigger_time_minutes = config.get("trigger_time_minutes", self.trigger_time_minutes)
-        self.warmup_enabled = config.get("warmup_enabled", self.warmup_enabled)
+        """热更新配置"""
+        self.idle_timeout_minutes = config.get("idle_timeout_minutes", self.idle_timeout_minutes)
+        self._scan_interval_minutes = config.get("scan_interval_minutes", self._scan_interval_minutes)
+        self._min_global_interval = config.get("min_global_interval", self._min_global_interval)
+        self._min_user_interval = config.get("min_user_interval", self._min_user_interval)

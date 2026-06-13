@@ -134,7 +134,7 @@ class MemoryCore:
         self.conversation_store: ConversationStore | None = None
         self.write_op_log: WriteOpLog | None = None
         self.page_api = None
-        self.hot_cache: IHotMessageCache = HotMessageCache(str(self.data_dir))
+        self.hot_cache: IHotMessageCache = HotMessageCache(str(self.data_dir), config=self.config)
         self._background_tasks: set[asyncio.Task] = set()
 
     async def initialize(self):
@@ -360,6 +360,7 @@ class MemoryCore:
         """Phase 8: 调度器 + 指令处理器"""
         self.consolidation_manager = ConsolidationManager(
             state_store=self.state_store,
+            hot_cache=self.hot_cache,
             warm_processor=self.warm_processor,
             config=self.config,
         )
@@ -878,6 +879,8 @@ class MemoryCore:
         self.config.update(config)
         if self.injector:
             self.injector.reload_config(self.config)
+        if self.hot_cache:
+            self.hot_cache.update_config(config)
         if self.consolidation_manager:
             self.consolidation_manager.update_config(config)
         # 切换 LLM 模型

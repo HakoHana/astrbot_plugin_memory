@@ -25,3 +25,17 @@ Thumbs.db
 /conftest.py
 /data/
 
+# 同级重复目录（源在 memori/ 下）
+/features/
+/lifecycle/
+/models/
+/pipeline/
+/prompts/
+/retrieval/
+/storage/
+/utils/
+/platform_tools.py
+
+# 根目录测试文件（源在 tests/ 下）
+/test_*.py
+

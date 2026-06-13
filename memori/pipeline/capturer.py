@@ -87,7 +87,7 @@ class Capturer(ICapturer):
             )
         try:
             system = self._prompts["judge"]
-            result_str = await self.llm.chat(system, conversation_summary, use_judge=True)
+            result_str = await self.llm.chat_with_judge(system, conversation_summary)
             return self._parse_judge_result(result_str, conversation_summary)
         except Exception as e:
             logger.warning(f"[Memory] Judge LLM 调用失败: {e}")

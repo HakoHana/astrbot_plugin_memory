@@ -6,3 +6,4 @@
 #   如不使用 AstrBot 而用 python -m memori 独立运行，只需 pip install memori[server]
 fastapi>=0.110.0
 uvicorn>=0.29.0
+PyJWT>=2.8.0
